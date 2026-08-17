@@ -39,6 +39,275 @@
   margin-top: 1.5rem;
 }
 
+/* ---- navigation ---- */
+.main-nav {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border, #e5e4e7);
+  margin-bottom: 1.25rem;
+}
+
+.nav-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.5rem 0.9rem;
+  cursor: pointer;
+  font-size: 0.95rem;
+  color: var(--text, #6b6375);
+}
+
+.nav-tab--active {
+  border-bottom-color: var(--accent, #aa3bff);
+  color: var(--text-h, #08060d);
+  font-weight: 600;
+}
+
+/* ---- templates page ---- */
+.templates-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.templates-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sample-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.unsaved-badge {
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(224, 168, 0, 0.15);
+  border: 1px solid rgba(224, 168, 0, 0.5);
+}
+
+.notice {
+  color: var(--text, #6b6375);
+  font-size: 0.9rem;
+  margin: 0.5rem 0;
+}
+
+.templates-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr 280px;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+/* Tablet: style panel drops below. Mobile: everything stacks (9.5). */
+@media (max-width: 1400px) {
+  .templates-layout {
+    grid-template-columns: 220px 1fr;
+  }
+  .style-pane {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .templates-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- style editor ---- */
+.style-pane {
+  border: 1px solid var(--border, #e5e4e7);
+  border-radius: 8px;
+  padding: 0.75rem;
+  max-height: 75vh;
+  overflow-y: auto;
+}
+
+.style-pane-title {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.style-group {
+  border-bottom: 1px solid var(--border, #e5e4e7);
+  padding: 0.35rem 0;
+}
+
+.style-group > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.group-reset {
+  margin-left: auto;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+}
+
+.style-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0;
+}
+
+.style-row--disabled {
+  opacity: 0.45;
+}
+
+.style-label {
+  font-size: 0.82rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Marks a field the profile has customised, so "changed" is not colour-only. */
+.override-dot {
+  color: var(--accent, #aa3bff);
+  font-size: 0.6rem;
+}
+
+.style-control input[type="number"],
+.style-control select {
+  width: 5.5rem;
+  font-size: 0.8rem;
+}
+
+.style-control input[type="color"] {
+  width: 2.2rem;
+  height: 1.5rem;
+  padding: 0;
+}
+
+.style-reset {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0 0.2rem;
+}
+
+.style-reset:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.order-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.order-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+}
+
+.order-list li span {
+  flex: 1;
+}
+
+.order-list button {
+  padding: 0 0.3rem;
+  font-size: 0.75rem;
+}
+
+.template-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.template-card {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border, #e5e4e7);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+.template-card--selected {
+  border-color: var(--accent, #aa3bff);
+  background: var(--accent-bg, rgba(170, 59, 255, 0.1));
+}
+
+.template-card-name {
+  font-weight: 600;
+  color: var(--text-h, #08060d);
+}
+
+.template-card-desc {
+  font-size: 0.8rem;
+  color: var(--text, #6b6375);
+}
+
+/* ---- resume preview ---- */
+.template-preview-pane {
+  overflow: auto;
+}
+
+.resume-preview {
+  position: relative;
+  display: inline-block;
+}
+
+.resume-preview-viewport {
+  overflow: hidden;
+  box-shadow: rgba(0, 0, 0, 0.18) 0 2px 12px;
+  background: #fff;
+}
+
+/* The rendered page is always white, so pin its text colours regardless of
+   the surrounding light/dark theme. */
+.resume-document,
+.resume-document * {
+  color-scheme: light;
+}
+
+.sample-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(224, 168, 0, 0.9);
+  color: #1a1a1a;
+  font-weight: 600;
+}
+
 .deepseek-status {
   display: flex;
   align-items: center;
@@ -220,4 +489,10 @@
 
 .modal-body p {
   margin: 0;
+}
+
+.pdf-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }

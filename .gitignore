@@ -80,3 +80,7 @@ blob-report/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local application database
+data/
+*.sqlite3

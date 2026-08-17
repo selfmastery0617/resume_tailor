@@ -15,6 +15,7 @@ import { InfoModal } from "./components/InfoModal";
 import { UrlCellRenderer } from "./components/UrlCellRenderer";
 import { SkillsCellRenderer, type SkillsGridContext } from "./components/SkillsCellRenderer";
 import { DeepSeekConnect } from "./components/DeepSeekConnect";
+import { TemplatesPage } from "./pages/TemplatesPage";
 import { DEFAULT_SKILLS_PROMPT } from "./constants/prompts";
 import "./App.css";
 
@@ -47,6 +48,7 @@ function App() {
   const [extractingSince, setExtractingSince] = useState<Map<string, number>>(new Map());
   const gridApiRef = useRef<GridApi<Job> | null>(null);
   const [deepSeekConnected, setDeepSeekConnected] = useState(false);
+  const [activeTab, setActiveTab] = useState<"jobs" | "templates">("jobs");
 
   // AG Grid does not re-render cells just because `context` changed, so the
   // Skills column has to be refreshed explicitly for the loading indicator to
@@ -125,6 +127,29 @@ function App() {
   return (
     <div className="app">
       <h1>JobTailor AI</h1>
+
+      <nav className="main-nav" aria-label="Sections">
+        {(["jobs", "templates"] as const).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            className={`nav-tab${activeTab === tab ? " nav-tab--active" : ""}`}
+            aria-current={activeTab === tab ? "page" : undefined}
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab === "jobs" ? "Jobs" : "Templates"}
+          </button>
+        ))}
+      </nav>
+
+      {/* Kept mounted rather than conditionally rendered: unmounting would
+          silently discard unsaved style edits when switching tabs. */}
+      <div hidden={activeTab !== "templates"}>
+        <TemplatesPage />
+      </div>
+
+      {/* The original Jobs view, unchanged — just scoped to its tab. */}
+      <div hidden={activeTab !== "jobs"}>
       <button className="import-button" onClick={handleImportJobs} disabled={loading}>
         {loading && <span className="spinner" aria-hidden="true" />}
         {loading ? "Importing..." : "Import Jobs"}
@@ -164,6 +189,7 @@ function App() {
         bodyText={skillsModalJob?.skills}
         onClose={() => setSkillsModalJob(null)}
       />
+      </div>
     </div>
   );
 }

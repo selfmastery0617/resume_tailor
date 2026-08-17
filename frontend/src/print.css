@@ -1,0 +1,36 @@
+/* Print-route resets (RG-FR-016).
+ *
+ * index.css styles #root as a bordered, centred app shell — none of which may
+ * appear in the captured document. These rules strip it back to the bare page.
+ */
+
+html[data-print="true"],
+html[data-print="true"] body,
+html[data-print="true"] #root {
+  margin: 0;
+  padding: 0;
+  width: auto;
+  max-width: none;
+  min-height: 0;
+  border: none;
+  background: #ffffff;
+  display: block;
+  text-align: left;
+  /* Force the light palette: the PDF is always on white paper, regardless of
+     the rendering machine's OS theme. */
+  color-scheme: light;
+}
+
+html[data-print="true"] {
+  /* No scrollbars in the captured document. */
+  overflow: visible;
+}
+
+html[data-print="true"] .resume-document {
+  /* Page margins come from Playwright's PDF settings, so the document itself
+     must not add its own or they would be applied twice (§4.4 spacing note). */
+  padding: 0 !important;
+  width: auto !important;
+  min-height: 0 !important;
+  box-shadow: none !important;
+}
