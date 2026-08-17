@@ -23,6 +23,19 @@ DEEPSEEK_ORIGIN = "https://chat.deepseek.com"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent / "secrets" / "deepseek_session.json"
 
 
+def _has_usable_user_token(raw_value: object) -> bool:
+    """Reject DeepSeek's logged-out ``{"value": null}`` placeholder."""
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return False
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return True
+    if isinstance(parsed, dict) and "value" in parsed:
+        return bool(parsed["value"])
+    return bool(parsed)
+
+
 async def main() -> int:
     output_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUTPUT
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,22 +64,23 @@ async def main() -> int:
         await browser.close()
 
     token_found = any(
-        item.get("name") == "userToken"
+        item.get("name") == "userToken" and _has_usable_user_token(item.get("value"))
         for origin in state.get("origins", [])
         for item in origin.get("localStorage", [])
     )
+
+    if not token_found:
+        print()
+        print("Session was not saved: `userToken` contains no authenticated value.")
+        print("Re-run and make sure the DeepSeek chat screen is fully loaded.")
+        return 1
 
     output_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
     print()
     print(f"Saved session -> {output_path}")
     print(f"  cookies:    {len(state.get('cookies', []))}")
-    print(f"  userToken:  {'found' if token_found else 'NOT FOUND'}")
-    if not token_found:
-        print()
-        print("WARNING: no `userToken` in localStorage — you may not have been")
-        print("fully logged in. Re-run and make sure the chat screen is loaded.")
-        return 1
+    print("  userToken:  found")
 
     print()
     print("Now set this in backend/.env:")

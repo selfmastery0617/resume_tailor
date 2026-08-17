@@ -57,17 +57,16 @@ const gridThemeDark = themeQuartz.withPart(colorSchemeDark).withParams({
   wrapperBorderRadius: "8px",
 });
 
-/** Turn an extract-skills failure into something actionable.
- *  401 specifically means the exported DeepSeek session has expired. */
+/** Turn an extract-skills failure into something actionable. */
 function describeExtractError(err: unknown): string {
   if (axios.isAxiosError(err)) {
     if (!err.response) {
       return "Could not reach the backend. Is it running on port 8000?";
     }
-    if (err.response.status === 401) {
-      return "DeepSeek session expired. Re-run scripts/capture_deepseek_session.py to refresh it.";
-    }
     const detail = (err.response.data as { detail?: string } | undefined)?.detail;
+    if (err.response.status === 401) {
+      return detail ?? "DeepSeek is not authenticated. Reconnect it from Settings.";
+    }
     if (detail) return detail;
   }
   return "Failed to extract skills. Check the backend logs for details.";

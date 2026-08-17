@@ -103,7 +103,9 @@ export function ProviderConnect({
           {busy ? "Signing in…" : connected ? "Connected" : "Not connected"}
         </span>
       </div>
-      <p className="deepseek-detail">{busy ? loginDetail : connected ? description : description}</p>
+      <p className="deepseek-detail">
+        {busy ? loginDetail : connected ? description : (session?.detail ?? description)}
+      </p>
       {error && <p className="error">{error}</p>}
       <button type="button" onClick={handleConnect} disabled={busy}>
         {busy && <span className="spinner" aria-hidden="true" />}
