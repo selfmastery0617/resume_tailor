@@ -1,0 +1,82 @@
+# =============================================================================
+# Secrets & credentials — NEVER commit these
+# =============================================================================
+# .env holds the live Jobright cookie and DeepSeek config.
+# .env.example is the safe template and is deliberately kept.
+.env
+.env.*
+!.env.example
+
+# Captured browser sessions: cookies AND the localStorage bearer token.
+# Anyone with these files can use the corresponding account.
+secrets/
+**/secrets/
+*deepseek_session*.json
+*deepseek_cookies*.json
+*storage_state*.json
+
+# =============================================================================
+# Python
+# =============================================================================
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =============================================================================
+# Node / frontend
+# =============================================================================
+node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+coverage/
+*.local
+
+# =============================================================================
+# Logs
+# =============================================================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =============================================================================
+# Playwright
+# =============================================================================
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+
+# =============================================================================
+# Editors & IDEs
+# =============================================================================
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*.sw?
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
