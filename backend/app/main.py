@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import init_db
-from app.routers import deepseek, jobs, profiles, resumes, templates
+from app.routers import deepseek, jobs, profiles, resumes, settings, templates
 from app.services.deepseek import DeepSeekService
 
 
@@ -33,6 +33,7 @@ app.include_router(deepseek.router)
 app.include_router(templates.router)
 app.include_router(profiles.router)
 app.include_router(resumes.router)
+app.include_router(settings.router)
 
 
 @app.get("/health")

@@ -27,8 +27,9 @@ html[data-print="true"] {
 }
 
 html[data-print="true"] .resume-document {
-  /* Page margins come from Playwright's PDF settings, so the document itself
-     must not add its own or they would be applied twice (§4.4 spacing note). */
+  /* The document renders content only; its page margins come from Playwright's
+     margin box here, and from page frames in the preview. These resets are
+     belt-and-braces so a stray style can never double-apply the margins. */
   padding: 0 !important;
   width: auto !important;
   min-height: 0 !important;

@@ -35,7 +35,14 @@ function hasResumeContent(profile: Profile | null): boolean {
   );
 }
 
-export function TemplatesPage() {
+interface TemplatesPageProps {
+  /** True while this tab is visible. Pages stay mounted to preserve unsaved
+   *  edits, so they must refresh on activation or they show stale data —
+   *  e.g. a profile created on the Profile tab. */
+  active?: boolean;
+}
+
+export function TemplatesPage({ active = true }: TemplatesPageProps) {
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const [systemDefaultStyle, setSystemDefaultStyle] = useState<ResumeStyle | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -47,6 +54,8 @@ export function TemplatesPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState(DEFAULT_TEMPLATE_ID);
   const [draftOverrides, setDraftOverrides] = useState<Partial<ResumeStyle>>({});
   const [useSample, setUseSample] = useState(false);
+  const [showStyleEditor, setShowStyleEditor] = useState(true);
+  const [showTemplateList, setShowTemplateList] = useState(true);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -79,6 +88,23 @@ export function TemplatesPage() {
       cancelled = true;
     };
   }, []);
+
+  // Re-read profiles whenever this tab is shown, so content entered on the
+  // Profile tab appears here without a page reload.
+  useEffect(() => {
+    if (!active) return;
+    (async () => {
+      try {
+        const list = await fetchProfiles();
+        setProfiles(list);
+        setActiveProfileId((current) =>
+          current && list.some((p) => p.id === current) ? current : (list[0]?.id ?? null),
+        );
+      } catch {
+        /* leave the existing list in place on a transient failure */
+      }
+    })();
+  }, [active]);
 
   // ---- load the active profile's saved template -------------------------
   const loadSettings = useCallback(async (profileId: string) => {
@@ -264,6 +290,23 @@ export function TemplatesPage() {
         </label>
 
         <div className="templates-actions">
+          {/* Both panels collapse so the preview can use the full width. */}
+          <button
+            type="button"
+            className="panel-toggle"
+            aria-pressed={showTemplateList}
+            onClick={() => setShowTemplateList((v) => !v)}
+          >
+            {showTemplateList ? "◀ Templates" : "▶ Templates"}
+          </button>
+          <button
+            type="button"
+            className="panel-toggle"
+            aria-pressed={showStyleEditor}
+            onClick={() => setShowStyleEditor((v) => !v)}
+          >
+            {showStyleEditor ? "Style ▶" : "Style ◀"}
+          </button>
           {dirty && <span className="unsaved-badge">Unsaved changes</span>}
           <button type="button" onClick={handleCancel} disabled={!dirty || saving}>
             Cancel
@@ -274,11 +317,19 @@ export function TemplatesPage() {
           <button type="button" onClick={handleSave} disabled={!activeProfileId || !dirty || saving}>
             {saving ? "Saving…" : "Save"}
           </button>
+          {/* The PDF always renders the real profile, never the sample. Without
+              this guard an empty profile silently produced a blank PDF while
+              the preview showed sample data. */}
           <button
             type="button"
             className="pdf-button"
             onClick={handleDownloadPdf}
-            disabled={!activeProfileId || generating}
+            disabled={!activeProfileId || generating || !hasResumeContent(activeProfile)}
+            title={
+              hasResumeContent(activeProfile)
+                ? "Generate a PDF from this profile"
+                : "Add resume content on the Profile tab first — the PDF uses your real profile, not the sample."
+            }
           >
             {generating && <span className="spinner" aria-hidden="true" />}
             {generating ? "Generating…" : "Download PDF"}
@@ -291,11 +342,18 @@ export function TemplatesPage() {
       {!hasResumeContent(activeProfile) && (
         <p className="notice">
           This profile has no resume content yet, so the preview shows sample data.
+          Add your details on the <strong>Profile</strong> tab to enable PDF download.
         </p>
       )}
 
-      <div className="templates-layout">
-        <ul className="template-list" aria-label="Available templates">
+      <div
+        className={
+          "templates-layout" +
+          (showTemplateList ? "" : " templates-layout--no-list") +
+          (showStyleEditor ? "" : " templates-layout--no-style")
+        }
+      >
+        <ul className="template-list" aria-label="Available templates" hidden={!showTemplateList}>
           {templates.map((template) => {
             const isSelected = template.id === selectedTemplateId;
             return (
@@ -329,7 +387,7 @@ export function TemplatesPage() {
           )}
         </div>
 
-        <aside className="style-pane" aria-label="Style editor">
+        <aside className="style-pane" aria-label="Style editor" hidden={!showStyleEditor}>
           <h2 className="style-pane-title">Style</h2>
           {!activeProfileId && (
             <p className="notice">Create a profile to save style changes.</p>

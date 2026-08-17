@@ -1,6 +1,5 @@
 import axios from "axios";
-
-const BACKEND_URL = "http://localhost:8000";
+import { BACKEND_URL } from "../config";
 
 export interface SessionStatus {
   connected: boolean;

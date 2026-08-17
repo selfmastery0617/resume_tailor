@@ -1,7 +1,13 @@
 import axios from "axios";
-import type { Profile, ProfileTemplateSettings, ResumeStyle, TemplateDefinition } from "../resume/types";
+import { BACKEND_URL } from "../config";
+import type {
+  Profile,
+  ProfileTemplateSettings,
+  ResumeData,
+  ResumeStyle,
+  TemplateDefinition,
+} from "../resume/types";
 
-const BACKEND_URL = "http://localhost:8000";
 
 export interface TemplateCatalog {
   templates: TemplateDefinition[];
@@ -22,6 +28,18 @@ export async function fetchProfiles(): Promise<Profile[]> {
 export async function createProfile(name: string): Promise<Profile> {
   const response = await axios.post<Profile>(`${BACKEND_URL}/api/profiles`, { name });
   return response.data;
+}
+
+export async function updateProfile(
+  profileId: string,
+  patch: { name?: string; data?: ResumeData },
+): Promise<Profile> {
+  const response = await axios.put<Profile>(`${BACKEND_URL}/api/profiles/${profileId}`, patch);
+  return response.data;
+}
+
+export async function deleteProfile(profileId: string): Promise<void> {
+  await axios.delete(`${BACKEND_URL}/api/profiles/${profileId}`);
 }
 
 export async function fetchTemplateSettings(profileId: string): Promise<ProfileTemplateSettings> {

@@ -1,7 +1,6 @@
 import axios from "axios";
+import { BACKEND_URL } from "../config";
 import type { Job } from "../types/job";
-
-const BACKEND_URL = "http://localhost:8000";
 
 export async function fetchJobs(): Promise<Job[]> {
   const response = await axios.get<Job[]>(`${BACKEND_URL}/api/jobs`);

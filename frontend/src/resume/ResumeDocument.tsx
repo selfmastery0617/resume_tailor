@@ -35,6 +35,7 @@ export const PAGE = {
 };
 
 export const CONTENT_WIDTH_IN = PAGE.widthIn - PAGE.marginLeftIn - PAGE.marginRightIn;
+export const CONTENT_HEIGHT_IN = PAGE.heightIn - PAGE.marginTopIn - PAGE.marginBottomIn;
 
 /** Per-template presentation knobs. */
 export interface TemplateChrome {
@@ -279,16 +280,18 @@ export function ResumeDocument({ data, style, chrome = {} }: ResumeDocumentProps
   };
 
   return (
+    /* Content only — no page geometry.
+     *
+     * Page size and margins are supplied by whoever renders this: the preview
+     * wraps it in page frames, and the PDF lets Playwright apply the margin
+     * box. Previously the document carried its own padding while the print
+     * route stripped it, so preview and PDF applied margins by two different
+     * mechanisms and drifted apart (RG-FR-015). */
     <div
       className="resume-document"
       style={{
         fontFamily: family,
-        width: `${PAGE.widthIn}in`,
-        minHeight: `${PAGE.heightIn}in`,
-        paddingTop: `${PAGE.marginTopIn}in`,
-        paddingBottom: `${PAGE.marginBottomIn}in`,
-        paddingLeft: `${PAGE.marginLeftIn}in`,
-        paddingRight: `${PAGE.marginRightIn}in`,
+        width: "100%",
         boxSizing: "border-box",
         background: "#ffffff",
         color: style.bodyColor,

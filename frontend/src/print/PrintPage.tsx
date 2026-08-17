@@ -8,10 +8,9 @@
  */
 
 import { useEffect, useState } from "react";
+import { BACKEND_URL } from "../config";
 import { getRenderer } from "../resume/templates";
 import type { ResumeData, ResumeStyle } from "../resume/types";
-
-const BACKEND_URL = "http://localhost:8000";
 
 interface RenderPayload {
   templateId: string;
