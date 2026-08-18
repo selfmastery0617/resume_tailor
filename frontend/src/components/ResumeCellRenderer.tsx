@@ -48,11 +48,25 @@ export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
     );
   }
 
+  // An applied job is a record of what was sent. Offering "Regenerate" would
+  // overwrite the file on disk that the application was actually made with, so
+  // the PDF stays openable and nothing else does.
+  const locked = Boolean(data.locked ?? data.applied);
+
   const saved = context.resumeResults[data.id];
   if (saved) {
     // The file lives on disk and can be moved or deleted from Explorer, so a
     // stale badge must offer a rebuild rather than a download that 404s.
     if (!saved.exists) {
+      // Locked, so it cannot be rebuilt — say where it went instead of offering
+      // a button that would be refused.
+      if (locked) {
+        return (
+          <span className="resume-missing" title={saved.filePath}>
+            ⚠️ File missing
+          </span>
+        );
+      }
       return (
         <button
           type="button"
@@ -77,17 +91,25 @@ export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
         >
           📄 {saved.fileName}
         </a>
-        <button
-          type="button"
-          className="resume-regenerate"
-          onClick={() => context.onGenerateResume(data)}
-          title="Generate again, overwriting the saved file"
-          aria-label="Regenerate resume"
-        >
-          ↻
-        </button>
+        {!locked && (
+          <button
+            type="button"
+            className="resume-regenerate"
+            onClick={() => context.onGenerateResume(data)}
+            title="Generate again, overwriting the saved file"
+            aria-label="Regenerate resume"
+          >
+            ↻
+          </button>
+        )}
       </span>
     );
+  }
+
+  // Applied, but nothing was ever generated for it — there is no resume to
+  // offer and making one now would misrepresent what was sent.
+  if (locked) {
+    return <span className="resume-none">No resume generated</span>;
   }
 
   // With the Experience column gone this button owns the whole flow: it

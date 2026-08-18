@@ -1225,6 +1225,72 @@ a.experience-badge:hover { text-decoration: underline; }
 
 .resume-regenerate:hover { color: var(--text-h); }
 
+/* ---- applied / delete actions ---- */
+.job-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.job-apply-button {
+  font-size: 0.78rem;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.job-applied-badge {
+  display: inline-block;
+  font-size: 0.76rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid rgba(62, 207, 142, 0.45);
+  border-radius: 6px;
+  background: var(--success-bg);
+  color: var(--text-h);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-delete-button {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.job-delete-button:hover {
+  color: var(--danger, #e5484d);
+  border-color: var(--danger, #e5484d);
+}
+
+/* A locked row reads as a record rather than a row awaiting work. Opacity is
+   kept high enough that the text stays legible — this is history, not noise. */
+.job-row--applied {
+  opacity: 0.72;
+}
+
+.job-row--applied .ag-cell {
+  font-style: italic;
+}
+
+.job-row--applied .job-applied-badge,
+.job-row--applied .job-delete-button,
+.job-row--applied a {
+  font-style: normal;
+}
+
+.resume-missing,
+.resume-none {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .exp-modal { max-width: 780px; }
 
 .exp-section { margin-bottom: 1.25rem; }

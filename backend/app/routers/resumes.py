@@ -96,6 +96,19 @@ class TailoredResumeRequest(BaseModel):
 @router.post("/api/resumes/tailored")
 async def generate_tailored_resume(payload: TailoredResumeRequest):
     """Render the extracted experience to a PDF and save it under the output folder."""
+    # Regenerating would overwrite the file on disk, which for an applied job is
+    # the document that was actually sent.
+    from app.services import job_store
+
+    if job_store.is_locked(payload.jobId):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "JOB_LOCKED",
+                "message": "This job is marked applied, so its resume can no longer be regenerated.",
+            },
+        )
+
     try:
         return await tailored_resume_service.generate_for_job(
             job_id=payload.jobId,
