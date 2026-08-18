@@ -4,6 +4,10 @@ import { BACKEND_URL } from "../config";
 export interface SessionStatus {
   connected: boolean;
   detail: string;
+  /** True when the backend actually loaded the provider to check, rather than
+   *  only inspecting the stored session file. */
+  verified?: boolean;
+  cached?: boolean;
 }
 
 /** Mirrors the backend's LoginStatus literal. */
@@ -15,8 +19,12 @@ export interface LoginStatus {
   elapsed_seconds: number;
 }
 
-export async function fetchSessionStatus(): Promise<SessionStatus> {
-  const response = await axios.get<SessionStatus>(`${BACKEND_URL}/api/deepseek/session`);
+export async function fetchSessionStatus(force = false): Promise<SessionStatus> {
+  const response = await axios.get<SessionStatus>(`${BACKEND_URL}/api/deepseek/session`, {
+    params: force ? { force: true } : undefined,
+    // A live probe launches a browser; allow well beyond the usual timeout.
+    timeout: 60000,
+  });
   return response.data;
 }
 

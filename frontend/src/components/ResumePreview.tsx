@@ -32,9 +32,20 @@ interface ResumePreviewProps {
   /** 1 = actual size. */
   scale?: number;
   isSample?: boolean;
+  /** Layout document for user templates. Overrides template.layout, so the
+   *  builder can preview unsaved edits. Built-in renderers ignore it. */
+  layout?: unknown;
 }
 
-export function ResumePreview({ data, style, template, scale = 0.8, isSample }: ResumePreviewProps) {
+export function ResumePreview({
+  data,
+  style,
+  template,
+  scale = 0.8,
+  isSample,
+  layout,
+}: ResumePreviewProps) {
+  const activeLayout = layout ?? template?.layout ?? undefined;
   const Renderer = getRenderer(template?.rendererKey);
   const measureRef = useRef<HTMLDivElement>(null);
   const [pageCount, setPageCount] = useState(1);
@@ -70,7 +81,7 @@ export function ResumePreview({ data, style, template, scale = 0.8, isSample }: 
       {/* Off-screen measurement copy at exact content width. */}
       <div className="resume-measure" aria-hidden="true">
         <div ref={measureRef} style={{ width: `${CONTENT_WIDTH_IN}in` }}>
-          <Renderer data={data} style={style} />
+          <Renderer data={data} style={style} layout={activeLayout} />
         </div>
       </div>
 
@@ -102,7 +113,7 @@ export function ResumePreview({ data, style, template, scale = 0.8, isSample }: 
                 style={{ width: `${CONTENT_WIDTH_IN}in`, height: `${CONTENT_HEIGHT_IN}in` }}
               >
                 <div style={{ transform: `translateY(-${pageIndex * CONTENT_HEIGHT_IN}in)` }}>
-                  <Renderer data={data} style={style} />
+                  <Renderer data={data} style={style} layout={activeLayout} />
                 </div>
               </div>
             </div>

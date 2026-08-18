@@ -110,14 +110,43 @@ _TEMPLATES: tuple[TemplateDefinition, ...] = (
 _BY_ID: dict[str, TemplateDefinition] = {t.id: t for t in _TEMPLATES}
 
 
-def list_templates(include_inactive: bool = False) -> list[TemplateDefinition]:
-    """Active templates in deterministic (registry) order."""
+def list_builtin_templates(include_inactive: bool = False) -> list[TemplateDefinition]:
+    """Only the source-controlled templates."""
     return [t for t in _TEMPLATES if include_inactive or t.active]
 
 
+def list_templates(include_inactive: bool = False) -> list[TemplateDefinition]:
+    """The full catalog: built-ins first, then user templates.
+
+    Built-ins lead so the ordering stays deterministic (7.1) as user templates
+    come and go.
+    """
+    # Imported here rather than at module scope: store.py imports schemas that
+    # import this module, and a top-level import would be circular.
+    from app.services.templates import store
+
+    builtins = list_builtin_templates(include_inactive=include_inactive)
+    try:
+        user = store.list_user_templates(include_inactive=include_inactive)
+    except Exception:
+        # A template-store failure must not take down the catalog; the
+        # built-ins are always renderable.
+        user = []
+    return [*builtins, *user]
+
+
 def get_template(template_id: str) -> TemplateDefinition | None:
-    """Exact lookup. Returns None when the id is unknown."""
-    return _BY_ID.get(template_id)
+    """Exact lookup across built-ins and user templates."""
+    found = _BY_ID.get(template_id)
+    if found is not None:
+        return found
+
+    from app.services.templates import store
+
+    try:
+        return store.get_user_template(template_id)
+    except Exception:
+        return None
 
 
 def resolve_template(template_id: str | None, *, fallback: bool = True) -> TemplateDefinition:
@@ -128,7 +157,7 @@ def resolve_template(template_id: str | None, *, fallback: bool = True) -> Templ
     raises instead of silently rendering the wrong design.
     """
     if template_id:
-        found = _BY_ID.get(template_id)
+        found = get_template(template_id)
         if found is not None:
             return found
     if not fallback:

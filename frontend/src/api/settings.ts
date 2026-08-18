@@ -7,8 +7,15 @@ export type GenerationModel = "deepseek" | "chatgpt";
 export interface AppSettings {
   skillsPrompt: string;
   tailoringPrompt: string;
+  /** Writes the resume summary from the bullets, in the same DeepSeek chat. */
+  summaryPrompt: string;
   outputFolder: string;
   generationModel: GenerationModel;
+  /** Company used as Job 1 (the earlier role) in experience extraction. */
+  firstCompany: string;
+  /** Profile used for tailored resume PDFs; its name becomes the file name.
+   *  Empty means "use the first profile". */
+  resumeProfile: string;
 }
 
 export interface FolderCheck {

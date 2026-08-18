@@ -21,6 +21,12 @@ class TemplateDefinition(BaseModel):
     rendererKey: str
     defaultStyle: dict = Field(default_factory=dict)
     supportedStyleFields: list[str] = Field(default_factory=list)
+    # 'builtin' templates are source-controlled and read-only; 'user' ones are
+    # rows in template_definitions and editable in the builder.
+    source: str = "builtin"
+    # Present only for user templates; built-ins render from code.
+    layout: dict | None = None
+    ownerProfileId: str | None = None
 
 
 class TemplateListResponse(BaseModel):

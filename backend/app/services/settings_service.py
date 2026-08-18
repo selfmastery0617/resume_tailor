@@ -21,26 +21,75 @@ Respond in exactly this format:
 Skills: <comma-separated list>
 Mission: <one sentence>"""
 
-DEFAULT_TAILORING_PROMPT = """You are tailoring a resume and cover letter for a specific job.
+# Used to turn selected challenges into resume bullets. Placeholders in braces
+# are substituted before the prompt is sent; unknown ones are left untouched.
+DEFAULT_TAILORING_PROMPT = """Write exactly {count} resume bullet points for a role at {company} on {product}.
 
-Using the candidate profile and the job description below, produce:
-1. A resume summary (2-3 sentences) aligned to this role.
-2. Rewritten experience bullets that emphasise the most relevant achievements.
-   Keep every claim truthful to the original profile - do not invent employers,
-   titles, dates, or metrics.
-3. A concise cover letter (3 short paragraphs) addressed to the hiring team.
+Rules:
+- Output exactly {count} lines, one bullet per line, with no numbering or headings.
+- Start each bullet with a strong past-tense verb.
+- Keep every metric and fact exactly as given. Do not invent numbers, employers,
+  dates, or technologies.
+- Tailor the emphasis to the target job description below.
 
-Return the sections clearly separated with these exact headings:
-=== SUMMARY ===
-=== EXPERIENCE ===
-=== COVER LETTER ==="""
+Target job description:
+{job_description}
+
+Source achievements:
+{achievements}"""
+
+# Substituted into the tailoring prompt. Surfaced in the Settings UI so the
+# prompt can be edited without guessing what is available.
+TAILORING_PLACEHOLDERS: tuple[str, ...] = (
+    "count",
+    "company",
+    "product",
+    "job_description",
+    "achievements",
+)
+
+# Runs last, in the same chat that just wrote the bullets, so the model already
+# has them in context; {bullets} is included anyway so the prompt still works if
+# the session drops and a fresh chat has to be opened.
+DEFAULT_SUMMARY_PROMPT = """Write a {sentences}-sentence professional summary for the top of a resume targeting this role.
+
+Rules:
+- Output only the summary itself — no heading, no label, no bullet points, no quotes.
+- Write in the implied first person: no "I", "my", or the candidate's name.
+- Use only what the experience below supports. Do not invent employers, titles,
+  metrics, technologies, or years of experience.
+- Lead with the strongest match to the target role.
+
+Target role: {job_title}
+
+Target job description:
+{job_description}
+
+Experience just written for this resume ({companies}):
+{bullets}"""
+
+SUMMARY_PLACEHOLDERS: tuple[str, ...] = (
+    "sentences",
+    "job_title",
+    "job_description",
+    "companies",
+    "bullets",
+)
 
 DEFAULTS: dict[str, Any] = {
     "skillsPrompt": DEFAULT_SKILLS_PROMPT,
     "tailoringPrompt": DEFAULT_TAILORING_PROMPT,
+    # Step 4: a resume summary written from the bullets the pipeline just made.
+    "summaryPrompt": DEFAULT_SUMMARY_PROMPT,
     "outputFolder": "",
     # Which signed-in provider Phase 5 uses to generate content.
     "generationModel": "deepseek",
+    # Company used as Job 1 (the earlier role) in experience extraction.
+    # Validated against database.json at save time.
+    "firstCompany": "",
+    # Profile whose details and template are used for tailored resume PDFs, and
+    # whose name becomes "<Profile>_resume.pdf". Empty = use the first profile.
+    "resumeProfile": "",
 }
 
 ALLOWED_MODELS = ("deepseek", "chatgpt")
@@ -80,6 +129,30 @@ def validate_settings(patch: dict[str, Any]) -> dict[str, Any]:
                 if not path.is_dir():
                     raise ValueError(f"Not a folder: {path}")
                 value = str(path)
+        elif key == "firstCompany":
+            if value:
+                # Reject a company that isn't in database.json now, rather than
+                # letting extraction fail later with a confusing error.
+                from app.services import experience_db_store
+
+                try:
+                    db = experience_db_store.load_database()
+                except Exception:  # noqa: BLE001 - a broken file is its own error
+                    db = None
+                if db is not None and db.find_company(str(value)) is None:
+                    raise ValueError(
+                        f"{value!r} is not a company in database.json."
+                    )
+                value = str(value).strip()
+        elif key == "resumeProfile":
+            if value:
+                # A deleted profile would otherwise fail at generation time with
+                # a 404 that says nothing about where the stale id came from.
+                from app.services import profile_service
+
+                value = str(value).strip()
+                if all(p.id != value for p in profile_service.list_profiles()):
+                    raise ValueError("That profile no longer exists.")
         elif not isinstance(value, str):
             raise ValueError(f"{key} must be text.")
 
@@ -99,6 +172,19 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
                 (key, json.dumps(value), now),
             )
     return get_settings()
+
+
+def render_template(text: str, values: dict[str, Any]) -> str:
+    """Substitute {placeholders} without str.format's brace fragility.
+
+    A user prompt may legitimately contain braces (JSON examples, code), which
+    str.format would treat as fields and raise on. Only the keys actually
+    supplied are replaced; anything else is left exactly as written.
+    """
+    rendered = text or ""
+    for key, value in values.items():
+        rendered = rendered.replace("{" + key + "}", str(value))
+    return rendered
 
 
 def check_folder(path_text: str) -> dict[str, Any]:

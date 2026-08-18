@@ -58,6 +58,9 @@ def content_hash(payload: dict[str, Any]) -> str:
             "templateVersion": payload.get("templateVersion"),
             "data": payload.get("data"),
             "style": payload.get("style"),
+            # Part of what determines the document, so two renders of the same
+            # template id at different layouts must not share a hash.
+            "layout": payload.get("layout"),
         },
         sort_keys=True,
         separators=(",", ":"),

@@ -47,6 +47,10 @@ def build_render_payload(
         "rendererKey": template.rendererKey,
         "data": data.model_dump(),
         "style": style.model_dump(),
+        # Required by the layout-v1 renderer. Without it the print route falls
+        # back to the default structure, so a user template would preview one
+        # way and print another.
+        "layout": template.layout,
     }
     return payload, build_pdf_filename(profile.name, template.id)
 
@@ -72,9 +76,9 @@ async def generate_resume_pdf(
             conn.execute(
                 "INSERT INTO generated_resumes"
                 " (id, profile_id, job_application_id, template_id, template_version,"
-                "  profile_snapshot_json, style_snapshot_json, file_name, file_path,"
-                "  content_hash, generated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                "  profile_snapshot_json, style_snapshot_json, layout_snapshot_json,"
+                "  file_name, file_path, content_hash, generated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
                 (
                     f"gen-{uuid.uuid4().hex[:12]}",
                     profile_id,
@@ -83,6 +87,9 @@ async def generate_resume_pdf(
                     payload["templateVersion"],
                     json.dumps(payload["data"]),
                     json.dumps(payload["style"]),
+                    # User templates are mutable, so pinning id+version alone
+                    # would let a later edit rewrite this record's meaning.
+                    json.dumps(payload.get("layout") or {}),
                     filename,
                     content_hash(payload),
                     _now(),

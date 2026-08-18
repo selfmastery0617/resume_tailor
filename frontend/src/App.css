@@ -1060,3 +1060,509 @@
   overflow-y: auto;
   align-items: flex-start;
 }
+
+/* ---- template builder ---- */
+.builder-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr) 260px;
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 1250px) {
+  .builder-layout { grid-template-columns: 1fr; }
+}
+
+.builder-structure {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  max-height: 78vh;
+  overflow-y: auto;
+}
+
+.builder-region { margin-bottom: 1rem; }
+
+.builder-region-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.builder-region-head strong {
+  color: var(--text-h);
+  text-transform: capitalize;
+  flex: 1;
+}
+
+.builder-split {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+}
+
+.builder-split input { width: 100%; }
+
+.builder-columns { display: flex; gap: 0.5rem; }
+
+.builder-column {
+  flex: 1;
+  min-width: 0;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem;
+}
+
+.builder-column-name {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.3rem;
+}
+
+.builder-block-list {
+  list-style: none;
+  margin: 0 0 0.4rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.builder-block {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.15rem 0.3rem;
+  cursor: grab;
+}
+
+.builder-block:active { cursor: grabbing; }
+
+.builder-block--selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.builder-block-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0.15rem 0.2rem;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.builder-block-tools { display: flex; gap: 0.1rem; }
+
+.builder-block-tools button {
+  padding: 0 0.25rem;
+  font-size: 0.7rem;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+}
+
+.builder-block-tools button:hover:not(:disabled) {
+  color: var(--text-h);
+  background: var(--surface-3);
+}
+
+.builder-add { width: 100%; font-size: 0.75rem; }
+
+/* ---- experience extraction ---- */
+.experience-badge {
+  font-size: 0.8rem;
+  padding: 0.2rem 0.55rem;
+  background: var(--success-bg);
+  border-color: rgba(62, 207, 142, 0.45);
+  color: var(--text-h);
+  cursor: pointer;
+}
+
+/* ---- tailored resume column ---- */
+.resume-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+/* The badge is an <a> here, not a <button>, so it needs the button's box back. */
+a.experience-badge {
+  display: inline-block;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid rgba(62, 207, 142, 0.45);
+  border-radius: 6px;
+  text-decoration: none;
+  line-height: 1.5;
+}
+
+a.experience-badge:hover { text-decoration: underline; }
+
+.resume-regenerate {
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.resume-regenerate:hover { color: var(--text-h); }
+
+.exp-modal { max-width: 780px; }
+
+.exp-section { margin-bottom: 1.25rem; }
+
+.exp-section h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.2rem;
+  color: var(--text-h);
+}
+
+.exp-meta {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.exp-summary {
+  font-size: 0.85rem;
+  line-height: 1.55;
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border-left: 2px solid var(--accent);
+  background: var(--bg-inset, rgba(255, 255, 255, 0.03));
+  border-radius: 0 6px 6px 0;
+}
+
+.exp-projects {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-bottom: 0.4rem;
+}
+
+.exp-bullets {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.exp-bullets li { line-height: 1.45; }
+
+.exp-warn {
+  border-left: 3px solid var(--warning);
+  padding-left: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.db-editor {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.provider-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* ---- embedded sign-in panel ---- */
+.login-panel {
+  margin-top: 0.9rem;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0.75rem;
+}
+
+.login-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+}
+
+.login-panel-head strong { color: var(--text-h); }
+.login-panel-head .provider-state { margin-left: auto; }
+
+.login-panel-head button {
+  background: none;
+  border: none;
+  font-size: 1.2rem;
+  line-height: 1;
+  color: var(--text-dim);
+  padding: 0 0.25rem;
+}
+
+.login-url {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.login-viewport {
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  overflow: hidden;
+  outline: none;
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Focus ring matters here: typing only reaches the remote page when focused. */
+.login-viewport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.login-viewport img {
+  display: block;
+  width: 100%;
+  height: auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+.login-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  padding: 2rem;
+}
+
+.login-hint {
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+}
+
+/* ---- progress console dock (right side) ---- */
+.app-shell:has(.console-dock) {
+  grid-template-columns: 210px minmax(0, 1fr) 420px;
+}
+
+@media (max-width: 1300px) {
+  .app-shell:has(.console-dock) {
+    grid-template-columns: 210px minmax(0, 1fr) 340px;
+  }
+}
+
+.console-dock {
+  border-left: 1px solid var(--border);
+  background: var(--surface-2);
+  height: 100svh;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.console-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.console-head strong { color: var(--text-h); font-size: 0.85rem; }
+
+.console-head button {
+  padding: 0.15rem 0.45rem;
+  font-size: 0.72rem;
+}
+
+.console-auto {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.console-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem 0.6rem 1.5rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.console-empty { padding: 0.5rem; line-height: 1.6; }
+
+.console-line {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+  border-bottom: 1px solid transparent;
+  align-items: start;
+}
+
+.console-time { color: var(--text-dim); opacity: 0.65; }
+.console-mark { width: 0.8em; text-align: center; }
+
+.console-stage {
+  color: var(--text-dim);
+  text-transform: uppercase;
+  font-size: 0.64rem;
+  letter-spacing: 0.05em;
+  padding-top: 0.1em;
+}
+
+.console-msg { color: var(--text); word-break: break-word; min-width: 0; }
+
+/* Level is carried by the marker glyph as well as colour (9.4). */
+.console-step .console-mark { color: var(--accent); }
+.console-result .console-mark,
+.console-result .console-msg { color: var(--success); }
+.console-warn .console-mark,
+.console-warn .console-msg { color: var(--warning); }
+.console-error .console-mark,
+.console-error .console-msg { color: var(--danger); }
+
+.console-dim { color: var(--text-dim); }
+
+.console-data {
+  margin: 0.3rem 0 0.4rem;
+  padding: 0.35rem 0.45rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.console-table { width: 100%; border-collapse: collapse; }
+.console-table td { padding: 0.12rem 0.25rem; vertical-align: top; }
+
+.console-score {
+  color: var(--accent);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.console-bars { display: flex; flex-direction: column; gap: 0.2rem; }
+
+.console-bar-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 70px auto;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.console-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-bar {
+  height: 7px;
+  background: var(--accent);
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.console-list { list-style: none; margin: 0; padding: 0; }
+.console-chosen { color: var(--success); }
+
+.console-quote {
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- finished extraction, shown in full (no Experience column any more) ---- */
+.console-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.console-result-block + .console-result-block {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.console-result-head {
+  color: var(--text-h);
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.console-result-projects { margin-bottom: 0.3rem; }
+
+.console-summary {
+  margin: 0;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.console-bullets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.console-bullets li {
+  position: relative;
+  padding-left: 0.85rem;
+  word-break: break-word;
+}
+
+.console-bullets li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+}
+
+.console-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  text-align: left;
+  margin-bottom: 0.35rem;
+  background: var(--surface);
+}
+
+.console-toggle--on {
+  border-color: var(--accent);
+  color: var(--text-h);
+}
