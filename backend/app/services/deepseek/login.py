@@ -23,6 +23,17 @@ from .session import DEEPSEEK_ORIGIN, DEFAULT_SESSION_PATH, USER_TOKEN_KEY
 
 LoginStatus = Literal["idle", "opening", "waiting", "success", "failed", "cancelled"]
 
+# DeepSeek writes a `userToken` into localStorage as soon as it redirects to its
+# own sign-in page — before the user has entered anything. Treating that as
+# success closed the window a few seconds after it opened and saved a session
+# that was never authenticated. Sign-in is therefore only accepted when all
+# three hold: off the login page, the composer rendered, and a token present.
+LOGIN_URL_MARKERS = ("/sign_in", "/login")
+CHAT_INPUT_SELECTOR = "textarea#chat-input, textarea"
+
+# Consecutive positive polls required before the session is saved.
+REQUIRED_CONFIRMATIONS = 2
+
 # How long to leave the sign-in window open before giving up.
 LOGIN_TIMEOUT_S = 600.0
 POLL_INTERVAL_S = 1.0
@@ -73,62 +84,88 @@ async def start_login() -> dict[str, Any]:
     return _state.snapshot()
 
 
-def _run_login_sync() -> None:
+def _is_signed_in(page: Any) -> bool:
+    """True once DeepSeek is genuinely usable for this session.
+
+    Two signals, deliberately chosen:
+
+    * NOT on the login page — this is what rejects the pre-auth token DeepSeek
+      writes the moment it redirects to /sign_in, which used to close the window
+      about four seconds after it opened.
+    * a userToken present — the credential the app actually authenticates with.
+
+    The composer is treated as a bonus accelerator, not a requirement: DeepSeek
+    can land on a chat, an empty state or a campaign page after login, and
+    demanding a specific textarea would leave the window open forever on any
+    layout that doesn't match.
+    """
     from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import sync_playwright
 
     try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                headless=False,  # the whole point: the user must see and use it
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
-            page.goto(DEEPSEEK_ORIGIN, timeout=60_000)
-            _state.set(
-                "waiting",
-                "Sign in to DeepSeek in the window that just opened. "
-                "This page updates automatically once you're done.",
-            )
+        if any(marker in page.url for marker in LOGIN_URL_MARKERS):
+            return False
+        token = page.evaluate("key => window.localStorage.getItem(key)", USER_TOKEN_KEY)
+        return bool(token)
+    except PlaywrightError:
+        # Navigating or reloading mid-check; try again on the next tick.
+        return False
 
-            deadline = time.monotonic() + LOGIN_TIMEOUT_S
-            while True:
-                if time.monotonic() > deadline:
-                    _state.set(
-                        "failed",
-                        "Timed out waiting for sign-in. Close the window and try again.",
-                    )
-                    browser.close()
-                    return
 
-                # User closed the window -> treat as an explicit cancel.
-                if page.is_closed() or not context.pages:
-                    _state.set("cancelled", "Sign-in window was closed before finishing.")
-                    browser.close()
-                    return
+def _run_login_sync() -> None:
+    from app.services.deepseek import browser as browser_mod
 
-                try:
-                    token = page.evaluate(
-                        "key => window.localStorage.getItem(key)", USER_TOKEN_KEY
-                    )
-                except PlaywrightError:
-                    # Navigating/reloading mid-evaluate; just try again.
-                    token = None
+    try:
+        # Persistent profile: signing in here writes cookies straight into the
+        # profile, so nothing has to be snapshotted and the session lasts as
+        # long as it naturally would in a normal browser.
+        with browser_mod.browser_context(headless=False) as context:
+            try:
+                page = browser_mod.first_page(context)
+                page.goto(DEEPSEEK_ORIGIN, timeout=60_000)
+                _state.set(
+                    "waiting",
+                    "Sign in to DeepSeek in the window that just opened. "
+                    "It closes by itself once you're done.",
+                )
 
-                if token:
-                    DEFAULT_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-                    context.storage_state(path=str(DEFAULT_SESSION_PATH))
-                    _state.set("success", "Signed in to DeepSeek. You can close the window.")
-                    browser.close()
-                    return
+                deadline = time.monotonic() + LOGIN_TIMEOUT_S
+                confirmations = 0
+                while True:
+                    if time.monotonic() > deadline:
+                        _state.set(
+                            "failed",
+                            "Timed out waiting for sign-in. Try again.",
+                        )
+                        return
 
-                time.sleep(POLL_INTERVAL_S)
+                    # User closed the window -> treat as an explicit cancel.
+                    if page.is_closed() or not context.pages:
+                        _state.set("cancelled", "Sign-in window was closed before finishing.")
+                        return
+
+                    # Require two consecutive positives: the redirect back from
+                    # the login form passes through transient states, and
+                    # snapshotting during one captures a half-written session.
+                    if _is_signed_in(page):
+                        confirmations += 1
+                    else:
+                        confirmations = 0
+
+                    if confirmations >= REQUIRED_CONFIRMATIONS:
+                        # Let cookies settle before the context closes and
+                        # flushes them into the profile.
+                        page.wait_for_timeout(1_500)
+                        # Also write a storage-state snapshot, so anything still
+                        # reading the old session file keeps working.
+                        DEFAULT_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+                        context.storage_state(path=str(DEFAULT_SESSION_PATH))
+                        _state.set("success", "Signed in to DeepSeek. Closing the window…")
+                        return
+
+                    time.sleep(POLL_INTERVAL_S)
+            finally:
+                # The context manager closes the browser on every path —
+                # success, timeout, cancel, or an unexpected error.
+                pass
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI verbatim
         _state.set("failed", f"Sign-in failed: {exc}")
