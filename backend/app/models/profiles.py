@@ -39,9 +39,18 @@ profiles = Table(
     Column("professional_title", Text, nullable=False, server_default=text("''")),
     Column("email", Text, nullable=False, server_default=text("''")),
     Column("phone", Text, nullable=False, server_default=text("''")),
+    # The full address. street and postal exist because the current profile
+    # form collects them and real profiles have them filled in — dropping them
+    # would lose data on migration, which a schema change should never do.
+    Column("street", Text, nullable=False, server_default=text("''")),
     Column("city", Text, nullable=False, server_default=text("''")),
     Column("state", Text, nullable=False, server_default=text("''")),
+    Column("postal", Text, nullable=False, server_default=text("''")),
     Column("country", Text, nullable=False, server_default=text("''")),
+    # Carried across for the same reason. Unset on every profile today, and a
+    # birthdate is rarely wanted on a resume — a candidate for removing from
+    # the profile form, but not for silently discarding here.
+    Column("birthday", Text, nullable=False, server_default=text("''")),
     Column("linkedin", Text, nullable=False, server_default=text("''")),
     Column("website", Text, nullable=False, server_default=text("''")),
     Column("summary", Text, nullable=False, server_default=text("''")),
