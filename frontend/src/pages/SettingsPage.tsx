@@ -4,14 +4,14 @@
  *  a reload and a server restart.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { fetchLoginStatus, fetchSessionStatus, startLogin } from "../api/deepseek";
 import {
-  checkFolder,
   fetchChatGptLoginStatus,
   fetchChatGptSession,
   fetchSettings,
   saveSettings,
+  selectFolder,
   startChatGptLogin,
   type AppSettings,
   type FolderCheck,
@@ -24,6 +24,7 @@ export function SettingsPage() {
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [folderCheck, setFolderCheck] = useState<FolderCheck | null>(null);
   const [saving, setSaving] = useState(false);
+  const [selectingFolder, setSelectingFolder] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -55,14 +56,30 @@ export function SettingsPage() {
     setNotice(null);
   };
 
-  const handleCheckFolder = useCallback(async () => {
+  const handleSelectFolder = async () => {
     if (!draft) return;
+    setSelectingFolder(true);
+    setError(null);
     try {
-      setFolderCheck(await checkFolder(draft.outputFolder));
-    } catch {
-      setFolderCheck({ valid: false, detail: "Could not verify the folder." });
+      const selection = await selectFolder(draft.outputFolder);
+      if (selection.cancelled) {
+        setNotice("Folder selection cancelled.");
+        return;
+      }
+      setFolderCheck(selection);
+      if (selection.valid && selection.resolved) {
+        update("outputFolder", selection.resolved);
+        setNotice("Folder selected and verified. Save settings to keep this change.");
+      }
+    } catch (err) {
+      const detail =
+        (err as { response?: { data?: { detail?: { message?: string } } } }).response?.data?.detail
+          ?.message;
+      setFolderCheck({ valid: false, detail: detail ?? "Could not open the folder picker." });
+    } finally {
+      setSelectingFolder(false);
     }
-  }, [draft]);
+  };
 
   const handleSave = async () => {
     if (!draft) return;
@@ -145,13 +162,14 @@ export function SettingsPage() {
             id="output-folder"
             type="text"
             className="folder-input"
-            placeholder="D:\JobTailor\Applications"
+            placeholder="No folder selected"
             value={draft.outputFolder}
-            onChange={(event) => update("outputFolder", event.target.value)}
+            readOnly
             aria-label="Output folder path"
+            title={draft.outputFolder || "No output folder selected"}
           />
-          <button type="button" onClick={handleCheckFolder}>
-            Verify
+          <button type="button" onClick={handleSelectFolder} disabled={selectingFolder}>
+            {selectingFolder ? "Opening…" : "Select folder…"}
           </button>
         </div>
         {folderCheck && (
