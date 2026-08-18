@@ -1,11 +1,14 @@
 """Resume PDF orchestration: build payload, render, snapshot, persist."""
 
-import json
-import uuid
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
 
 from app.db import get_db
+from app.ids import uuid7
+from app.models import generated_documents, profiles, templates
 from app.schemas.resume import ResumeData
 from app.schemas.style import merge_style, validate_overrides
 from app.services import profile_service
@@ -72,40 +75,86 @@ async def generate_resume_pdf(
     if persist:
         # US-RG-02: the snapshot is what makes a historical PDF reproducible;
         # later profile or template-default edits must not alter it.
-        with get_db() as conn:
-            conn.execute(
-                "INSERT INTO generated_resumes"
-                " (id, profile_id, job_application_id, template_id, template_version,"
-                "  profile_snapshot_json, style_snapshot_json, layout_snapshot_json,"
-                "  file_name, file_path, content_hash, generated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
-                (
-                    f"gen-{uuid.uuid4().hex[:12]}",
-                    profile_id,
-                    job_application_id,
-                    payload["templateId"],
-                    payload["templateVersion"],
-                    json.dumps(payload["data"]),
-                    json.dumps(payload["style"]),
-                    # User templates are mutable, so pinning id+version alone
-                    # would let a later edit rewrite this record's meaning.
-                    json.dumps(payload.get("layout") or {}),
-                    filename,
-                    content_hash(payload),
-                    _now(),
-                ),
-            )
+        record_document(
+            profile_id=profile_id,
+            job_id=job_application_id,
+            payload=payload,
+            file_name=filename,
+            byte_size=len(pdf_bytes),
+        )
 
     return pdf_bytes, filename
 
 
-def list_generated(profile_id: str | None = None) -> list[dict[str, Any]]:
-    query = "SELECT * FROM generated_resumes"
-    params: tuple = ()
-    if profile_id:
-        query += " WHERE profile_id = ?"
-        params = (profile_id,)
-    query += " ORDER BY generated_at DESC"
+def record_document(
+    *,
+    profile_id: str,
+    job_id: str | None,
+    payload: dict[str, Any],
+    file_name: str,
+    byte_size: int = 0,
+    page_count: int = 0,
+    storage_key: str | None = None,
+) -> UUID:
+    """Write the immutable record of one generated document.
+
+    generated_resumes and job_resume used to be separate tables saying
+    overlapping things about the same PDF; they are one table now, told apart
+    by `kind` and by whether a storage key was written.
+    """
+    from app.services import job_store
+
     with get_db() as conn:
-        rows = conn.execute(query, params).fetchall()
-    return [dict(row) for row in rows]
+        owner = conn.execute(
+            select(profiles.c.user_id).where(profiles.c.id == UUID(str(profile_id)))
+        ).scalar()
+
+        template_uuid = conn.execute(
+            select(templates.c.id).where(templates.c.key == payload["templateId"])
+        ).scalar()
+
+        job_row = job_store._find(conn, job_id) if job_id else None
+
+        document_id = uuid7()
+        conn.execute(
+            generated_documents.insert().values(
+                id=document_id,
+                profile_id=UUID(str(profile_id)),
+                user_id=owner,
+                # Null when nothing prompted it — a profile may hold a generic
+                # resume that no listing asked for.
+                job_id=job_row.id if job_row is not None else None,
+                run_id=None,
+                kind="resume",
+                template_id=template_uuid,
+                template_version=payload["templateVersion"],
+                content_snapshot=payload["data"],
+                style_snapshot=payload["style"],
+                # User templates are mutable, so pinning id+version alone would
+                # let a later edit rewrite this record's meaning.
+                layout_snapshot=payload.get("layout") or {},
+                file_name=file_name,
+                storage_key=storage_key,
+                byte_size=byte_size,
+                page_count=page_count,
+                content_hash=content_hash(payload),
+            )
+        )
+    return document_id
+
+
+def list_generated(profile_id: str | None = None) -> list[dict[str, Any]]:
+    query = select(generated_documents).where(generated_documents.c.deleted_at.is_(None))
+    if profile_id:
+        query = query.where(generated_documents.c.profile_id == UUID(str(profile_id)))
+    with get_db() as conn:
+        rows = conn.execute(
+            query.order_by(generated_documents.c.generated_at.desc())
+        ).all()
+    return [
+        {
+            key: (str(value) if isinstance(value, UUID) else value)
+            for key, value in row._mapping.items()
+        }
+        for row in rows
+    ]

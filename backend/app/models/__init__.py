@@ -11,7 +11,6 @@ from .base import metadata
 from .config import prompts, provider_accounts, settings, work_queue
 from .corpus import (
     EMBEDDING_DIMENSIONS,
-    challenge_embeddings,
     challenge_skills,
     challenges,
     companies,
@@ -53,21 +52,14 @@ from .profiles import (
 # contrib module, so CREATE EXTENSION works on a stock install with no build.
 REQUIRED_EXTENSIONS = ("pgcrypto",)
 
-# pgvector is a separate download and, on Windows, a compile step. Nothing reads
-# these tables yet — ranking still encodes with sentence-transformers in Python
-# and never asks the database — so they get their own migration. Run it when
-# moving similarity search into Postgres; skip it and everything else works.
-VECTOR_EXTENSION = "vector"
-DEFERRED_TABLES: tuple[str, ...] = ("challenge_embeddings",)
+# Embedding storage lives in models/embeddings.py and is not imported here —
+# see that module for why.
 
 __all__ = [
-    "DEFERRED_TABLES",
     "EMBEDDING_DIMENSIONS",
     "REQUIRED_EXTENSIONS",
-    "VECTOR_EXTENSION",
     "application_events",
     "audit_log",
-    "challenge_embeddings",
     "challenge_skills",
     "challenges",
     "companies",

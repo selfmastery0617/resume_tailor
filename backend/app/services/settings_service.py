@@ -5,13 +5,16 @@ every reload; storing settings here fixes that and gives Phase 5 somewhere to
 read the tailoring prompt and output folder from.
 """
 
-import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from app.db import get_db
+from app.models import prompts, settings
 
 DEFAULT_SKILLS_PROMPT = """Extract the following from this job description:
 1. Main Skills - the key technical and professional skills required, as a concise comma-separated list.
@@ -99,11 +102,40 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# Prompts live in their own table, keyed by kind, because they are scoped and
+# versioned differently from a plain preference. The API still presents them as
+# ordinary settings keys, so nothing above this module has to care.
+PROMPT_KEYS: dict[str, str] = {
+    "skillsPrompt": "skills",
+    "tailoringPrompt": "tailoring",
+    "summaryPrompt": "summary",
+}
+
+
 def get_settings() -> dict[str, Any]:
     """Stored settings merged over defaults, so a new key never returns None."""
+    from app.bootstrap import current_user_id
+
+    user_id = current_user_id()
+    stored: dict[str, Any] = {}
+
     with get_db() as conn:
-        rows = conn.execute("SELECT key, value_json FROM app_settings").fetchall()
-    stored = {row["key"]: json.loads(row["value_json"]) for row in rows}
+        for row in conn.execute(
+            select(settings.c.key, settings.c.value).where(
+                settings.c.scope == "user", settings.c.user_id == user_id
+            )
+        ):
+            stored[row.key] = row.value
+
+        by_kind = {v: k for k, v in PROMPT_KEYS.items()}
+        for row in conn.execute(
+            select(prompts.c.kind, prompts.c.body).where(
+                prompts.c.scope == "user", prompts.c.user_id == user_id
+            )
+        ):
+            if row.kind in by_kind:
+                stored[by_kind[row.kind]] = row.body
+
     return {**DEFAULTS, **{k: v for k, v in stored.items() if k in DEFAULTS}}
 
 
@@ -162,15 +194,46 @@ def validate_settings(patch: dict[str, Any]) -> dict[str, Any]:
 
 def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
     cleaned = validate_settings(patch)
-    now = _now()
+    from app.bootstrap import current_user_id
+    from app.ids import uuid7
+
+    user_id = current_user_id()
+
     with get_db() as conn:
         for key, value in cleaned.items():
-            conn.execute(
-                "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?, ?, ?)"
-                " ON CONFLICT(key) DO UPDATE SET"
-                "   value_json = excluded.value_json, updated_at = excluded.updated_at",
-                (key, json.dumps(value), now),
-            )
+            if kind := PROMPT_KEYS.get(key):
+                # The partial unique index covers (user_id, kind) where the
+                # scope is 'user', which is what makes this upsert land on one
+                # row instead of accumulating revisions.
+                statement = pg_insert(prompts).values(
+                    id=uuid7(),
+                    scope="user",
+                    user_id=user_id,
+                    kind=kind,
+                    body=str(value),
+                )
+                conn.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[prompts.c.user_id, prompts.c.kind],
+                        index_where=prompts.c.scope == "user",
+                        set_={"body": statement.excluded.body, "updated_at": func.now()},
+                    )
+                )
+            else:
+                statement = pg_insert(settings).values(
+                    id=uuid7(),
+                    scope="user",
+                    user_id=user_id,
+                    key=key,
+                    value=value,
+                )
+                conn.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[settings.c.user_id, settings.c.key],
+                        index_where=settings.c.scope == "user",
+                        set_={"value": statement.excluded.value, "updated_at": func.now()},
+                    )
+                )
     return get_settings()
 
 

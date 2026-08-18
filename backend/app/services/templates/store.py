@@ -8,12 +8,17 @@ Every save bumps `version`; generated resumes pin (template_id, version) plus a
 layout snapshot, so editing a template cannot alter an already-generated PDF.
 """
 
-import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 
+from sqlalchemy import Connection, delete, func, select
+
+from app.bootstrap import current_org_id, current_user_id
 from app.db import get_db
+from app.ids import uuid7
+from app.models import templates, templates_versions
 from app.schemas.layout import LayoutError, default_layout, validate_layout
 from app.schemas.style import validate_overrides
 from app.schemas.template import TemplateDefinition
@@ -37,37 +42,67 @@ def _now() -> str:
 
 
 def _row_to_definition(row) -> TemplateDefinition:
+    """Row pair (templates joined to its current template_versions) -> schema.
+
+    The app knows a template by its key ("user-template-ab12"); the database
+    knows it by a UUID. `key` is what crosses the boundary, so nothing above
+    this module had to change.
+    """
     return TemplateDefinition(
-        id=row["id"],
-        name=row["name"],
-        description=row["description"],
-        version=row["version"],
-        active=bool(row["active"]),
-        rendererKey=row["renderer_key"],
-        defaultStyle=json.loads(row["default_style_json"]),
+        id=row.key,
+        name=row.name,
+        description=row.description,
+        version=row.current_version,
+        active=bool(row.is_active),
+        rendererKey=row.renderer_key,
+        defaultStyle=row.default_style or {},
         # A layout template honours every style field; nothing is ignored.
         supportedStyleFields=[],
-        source=row["source"],
-        layout=json.loads(row["layout_json"]),
-        ownerProfileId=row["owner_profile_id"],
+        source=row.source,
+        layout=row.layout or {},
+        ownerProfileId=None,
+    )
+
+
+def _with_current_version():
+    """templates joined to the template_versions row it currently points at."""
+    return (
+        select(
+            templates.c.key,
+            templates.c.name,
+            templates.c.description,
+            templates.c.source,
+            templates.c.renderer_key,
+            templates.c.current_version,
+            templates.c.is_active,
+            templates.c.created_at,
+            templates_versions.c.layout,
+            templates_versions.c.default_style,
+        )
+        .select_from(
+            templates.join(
+                templates_versions,
+                (templates_versions.c.template_id == templates.c.id)
+                & (templates_versions.c.version == templates.c.current_version),
+            )
+        )
     )
 
 
 def list_user_templates(include_inactive: bool = False) -> list[TemplateDefinition]:
-    query = "SELECT * FROM template_definitions WHERE source = 'user'"
+    query = _with_current_version().where(templates.c.source == "user")
     if not include_inactive:
-        query += " AND active = 1"
-    query += " ORDER BY created_at"
+        query = query.where(templates.c.is_active.is_(True))
     with get_db() as conn:
-        rows = conn.execute(query).fetchall()
+        rows = conn.execute(query.order_by(templates.c.created_at)).all()
     return [_row_to_definition(r) for r in rows]
 
 
 def get_user_template(template_id: str) -> TemplateDefinition | None:
     with get_db() as conn:
         row = conn.execute(
-            "SELECT * FROM template_definitions WHERE id = ?", (template_id,)
-        ).fetchone()
+            _with_current_version().where(templates.c.key == template_id)
+        ).first()
     return _row_to_definition(row) if row else None
 
 
@@ -88,27 +123,37 @@ def create_user_template(
     if not clean_name:
         raise ValueError("Template name is required")
 
-    template_id = f"{USER_ID_PREFIX}{uuid.uuid4().hex[:12]}"
-    now = _now()
+    template_key = f"{USER_ID_PREFIX}{uuid.uuid4().hex[:12]}"
     with get_db() as conn:
+        row_id = conn.execute(
+            templates.insert()
+            .values(
+                id=uuid7(),
+                org_id=current_org_id(),
+                owner_user_id=current_user_id(),
+                key=template_key,
+                name=clean_name,
+                description=(description or "").strip(),
+                source="user",
+                visibility="private",
+                renderer_key=LAYOUT_RENDERER_KEY,
+                current_version=1,
+                is_active=True,
+            )
+            .returning(templates.c.id)
+        ).scalar_one()
+        # The layout and style live on the version row, so an edit can bump the
+        # version without overwriting what a generated resume was rendered from.
         conn.execute(
-            "INSERT INTO template_definitions"
-            " (id, name, description, version, active, renderer_key, source,"
-            "  layout_json, default_style_json, owner_profile_id, created_at, updated_at)"
-            " VALUES (?, ?, ?, 1, 1, ?, 'user', ?, ?, ?, ?, ?)",
-            (
-                template_id,
-                clean_name,
-                (description or "").strip(),
-                LAYOUT_RENDERER_KEY,
-                parsed_layout.model_dump_json(),
-                json.dumps(style),
-                owner_profile_id,
-                now,
-                now,
-            ),
+            templates_versions.insert().values(
+                id=uuid7(),
+                template_id=row_id,
+                version=1,
+                layout=parsed_layout.model_dump(),
+                default_style=style,
+            )
         )
-    created = get_user_template(template_id)
+    created = get_user_template(template_key)
     assert created is not None
     return created
 
@@ -179,21 +224,34 @@ def update_user_template(
     if not new_name:
         raise ValueError("Template name is required")
 
+    next_version = existing.version + 1
     with get_db() as conn:
+        row_id = conn.execute(
+            select(templates.c.id).where(templates.c.key == template_id)
+        ).scalar_one()
         conn.execute(
-            "UPDATE template_definitions SET"
-            "  name = ?, description = ?, layout_json = ?, default_style_json = ?,"
-            "  active = ?, version = version + 1, updated_at = ?"
-            " WHERE id = ?",
-            (
-                new_name,
-                existing.description if description is None else description.strip(),
-                json.dumps(new_layout),
-                json.dumps(new_style),
-                1 if (existing.active if active is None else active) else 0,
-                _now(),
-                template_id,
-            ),
+            templates.update()
+            .where(templates.c.id == row_id)
+            .values(
+                name=new_name,
+                description=(
+                    existing.description if description is None else description.strip()
+                ),
+                is_active=existing.active if active is None else active,
+                current_version=next_version,
+                updated_at=func.now(),
+            )
+        )
+        # A new row rather than an update: past versions stay readable, which is
+        # what lets a generated resume be explained after the template moves on.
+        conn.execute(
+            templates_versions.insert().values(
+                id=uuid7(),
+                template_id=row_id,
+                version=next_version,
+                layout=new_layout,
+                default_style=new_style,
+            )
         )
     updated = get_user_template(template_id)
     assert updated is not None
@@ -209,7 +267,7 @@ def delete_user_template(template_id: str) -> None:
     """
     _assert_editable(template_id)
     with get_db() as conn:
-        conn.execute("DELETE FROM template_definitions WHERE id = ?", (template_id,))
+        conn.execute(delete(templates).where(templates.c.key == template_id))
 
 
 def layout_for(template: TemplateDefinition) -> dict[str, Any] | None:

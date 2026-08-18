@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from app.db import get_db
+from app.models import generated_documents, profiles, templates
 from app.schemas.resume import Experience, Profile, ResumeData
 from app.services import experience_service, profile_service, resume_service, settings_service
 from app.services.pdf.filename import build_job_folder_name, build_tailored_pdf_filename
@@ -192,10 +193,14 @@ async def generate_for_job(
     )
 
     data = build_tailored_data(profile, experience)
+    # persist=False: the record is written once below, with the storage key and
+    # page count filled in, rather than twice with the first row incomplete.
+    render_payload, _ = resume_service.build_render_payload(profile.id, draft_data=data)
     pdf_bytes, _download_name = await resume_service.generate_resume_pdf(
         profile_id=profile.id,
         draft_data=data,
         job_application_id=job_id,
+        persist=False,
     )
 
     try:
@@ -219,10 +224,7 @@ async def generate_for_job(
         "byteSize": len(pdf_bytes),
         "generatedAt": _now(),
     }
-    _save_record(record)
-    # The path in generated_resumes is what makes the history row point at a
-    # real file instead of just naming one.
-    _link_generated_row(job_id, str(destination))
+    _save_record(record, render_payload)
 
     progress.emit(
         "resume",
@@ -252,79 +254,99 @@ def _page_count_of(pdf_bytes: bytes) -> int:
 # -- persistence -----------------------------------------------------------
 
 
-def _save_record(record: dict[str, Any]) -> None:
-    with get_db() as conn:
-        conn.execute(
-            "INSERT INTO job_resume"
-            " (job_id, profile_id, profile_name, template_id, folder, file_name,"
-            "  file_path, page_count, byte_size, generated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(job_id) DO UPDATE SET"
-            "   profile_id = excluded.profile_id,"
-            "   profile_name = excluded.profile_name,"
-            "   template_id = excluded.template_id,"
-            "   folder = excluded.folder,"
-            "   file_name = excluded.file_name,"
-            "   file_path = excluded.file_path,"
-            "   page_count = excluded.page_count,"
-            "   byte_size = excluded.byte_size,"
-            "   generated_at = excluded.generated_at",
-            (
-                record["jobId"],
-                record["profileId"],
-                record["profileName"],
-                record["templateId"],
-                record["folder"],
-                record["fileName"],
-                record["filePath"],
-                record["pageCount"],
-                record["byteSize"],
-                record["generatedAt"],
-            ),
-        )
+def _save_record(record: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Record the document. One table now, not two saying overlapping things."""
+    from app.services import resume_service
 
-
-def _link_generated_row(job_id: str, path: str) -> None:
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE generated_resumes SET file_path = ?"
-            " WHERE id = (SELECT id FROM generated_resumes"
-            "             WHERE job_application_id = ?"
-            "             ORDER BY generated_at DESC LIMIT 1)",
-            (path, job_id),
-        )
+    resume_service.record_document(
+        profile_id=record["profileId"],
+        job_id=record["jobId"],
+        payload=payload,
+        file_name=record["fileName"],
+        byte_size=record["byteSize"],
+        page_count=record["pageCount"],
+        # Where the bytes actually are. A filesystem path today; an object key
+        # once this stops running on the machine that reads it.
+        storage_key=record["filePath"],
+    )
 
 
 def _row_to_record(row) -> dict[str, Any]:
     record = {
-        "jobId": row["job_id"],
-        "profileId": row["profile_id"],
-        "profileName": row["profile_name"],
-        "templateId": row["template_id"],
-        "folder": row["folder"],
-        "fileName": row["file_name"],
-        "filePath": row["file_path"],
-        "pageCount": row["page_count"],
-        "byteSize": row["byte_size"],
-        "generatedAt": row["generated_at"],
+        "jobId": str(row.job_id) if row.job_id else "",
+        "profileId": str(row.profile_id),
+        "profileName": row.profile_name or "",
+        "templateId": row.template_key or "",
+        "folder": str(Path(row.storage_key).parent) if row.storage_key else "",
+        "fileName": row.file_name,
+        "filePath": row.storage_key or "",
+        "pageCount": row.page_count,
+        "byteSize": row.byte_size,
+        "generatedAt": row.generated_at.isoformat() if row.generated_at else "",
     }
     # The file can be moved or deleted from Explorer; the badge should say so
     # rather than offering a download that 404s.
-    record["exists"] = Path(row["file_path"]).is_file()
+    record["exists"] = bool(row.storage_key) and Path(row.storage_key).is_file()
     return record
 
 
+def _saved_documents():
+    """Documents that were written to the output folder, newest per job."""
+    from sqlalchemy import select
+
+    return (
+        select(
+            generated_documents.c.job_id,
+            generated_documents.c.profile_id,
+            generated_documents.c.file_name,
+            generated_documents.c.storage_key,
+            generated_documents.c.page_count,
+            generated_documents.c.byte_size,
+            generated_documents.c.generated_at,
+            profiles.c.name.label("profile_name"),
+            templates.c.key.label("template_key"),
+        )
+        .select_from(
+            generated_documents.join(
+                profiles, profiles.c.id == generated_documents.c.profile_id
+            ).outerjoin(templates, templates.c.id == generated_documents.c.template_id)
+        )
+        .where(
+            generated_documents.c.storage_key.isnot(None),
+            generated_documents.c.deleted_at.is_(None),
+        )
+    )
+
+
 def get_record(job_id: str) -> dict[str, Any] | None:
+    from app.services import job_store
+
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM job_resume WHERE job_id = ?", (job_id,)).fetchone()
+        job_row = job_store._find(conn, job_id)
+        if job_row is None:
+            return None
+        row = conn.execute(
+            _saved_documents()
+            .where(generated_documents.c.job_id == job_row.id)
+            .order_by(generated_documents.c.generated_at.desc())
+            .limit(1)
+        ).first()
     return _row_to_record(row) if row else None
 
 
 def all_records() -> dict[str, dict[str, Any]]:
     """Every saved resume, so the table can restore its badges after a reload."""
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM job_resume").fetchall()
-    return {row["job_id"]: _row_to_record(row) for row in rows}
+        rows = conn.execute(
+            _saved_documents().order_by(generated_documents.c.generated_at.desc())
+        ).all()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        # Newest first, so the first row seen for a job is the current one.
+        key = str(row.job_id) if row.job_id else ""
+        if key and key not in out:
+            out[key] = _row_to_record(row)
+    return out
 
 
 def read_pdf(job_id: str) -> tuple[bytes, str]:

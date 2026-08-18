@@ -21,7 +21,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable, DropIndex, DropTable
 
-from app.models import DEFERRED_TABLES, REQUIRED_EXTENSIONS, metadata
+from app.models import REQUIRED_EXTENSIONS, metadata
 
 revision = "0001_initial_schema"
 down_revision = None
@@ -36,11 +36,8 @@ def _ddl(element) -> str:
 
 
 def _tables():
-    """Everything except the tables that need pgvector.
-
-    sorted_tables resolves foreign key dependencies, so parents come first.
-    """
-    return [t for t in metadata.sorted_tables if t.name not in DEFERRED_TABLES]
+    """sorted_tables resolves foreign keys, so parents come first."""
+    return list(metadata.sorted_tables)
 
 
 def upgrade() -> None:

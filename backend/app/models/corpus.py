@@ -7,7 +7,6 @@ once, and profiles are different framings of it.
 
 from __future__ import annotations
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -27,8 +26,8 @@ from sqlalchemy.dialects.postgresql import UUID
 
 from .base import metadata, owned_by, pk_column, timestamps
 
-# all-MiniLM-L6-v2 output width. Changing model means a new row, not a rewrite,
-# because embeddings are keyed by (challenge_id, model).
+# all-MiniLM-L6-v2 output width. Used by app/models/embeddings.py, which is
+# deliberately not imported here — see that module.
 EMBEDDING_DIMENSIONS = 384
 
 companies = Table(
@@ -180,40 +179,8 @@ challenge_skills = Table(
     ),
 )
 
-challenge_embeddings = Table(
-    "challenge_embeddings",
-    metadata,
-    Column(
-        "challenge_id",
-        UUID(as_uuid=True),
-        ForeignKey("challenges.id", ondelete="CASCADE"),
-        primary_key=True,
-    ),
-    Column("model", Text, primary_key=True),
-    # sha256 of search_text at the time of encoding. Matching means the stored
-    # vector is still valid, so an unchanged challenge is never re-embedded.
-    Column("content_hash", Text, nullable=False),
-    Column("embedding", Vector(EMBEDDING_DIMENSIONS), nullable=False),
-    Column(
-        "computed_at",
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=text("now()"),
-    ),
-)
-
-# Pointless at 32 rows — Postgres will sequential-scan and be right to. Correct
-# and free once the corpus is thousands of rows.
-Index(
-    "ix_challenge_embeddings_vector",
-    challenge_embeddings.c.embedding,
-    postgresql_using="hnsw",
-    postgresql_ops={"embedding": "vector_cosine_ops"},
-)
-
 __all__ = [
     "EMBEDDING_DIMENSIONS",
-    "challenge_embeddings",
     "challenge_skills",
     "challenges",
     "companies",

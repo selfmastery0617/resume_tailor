@@ -93,6 +93,9 @@ jobs = Table(
     Column("salary_min", Numeric(12, 2), nullable=True),
     Column("salary_max", Numeric(12, 2), nullable=True),
     Column("work_model", Text, nullable=False, server_default=text("''")),
+    # The source's own skill tags for the listing, kept verbatim. Distinct from
+    # extraction_skills, which is what the model parsed out of the description.
+    Column("skills", Text, nullable=False, server_default=text("''")),
     # Arrives from Jobright as a string; a number is sortable.
     Column("match_score", Numeric(5, 2), nullable=True),
     Column("published_at", DateTime(timezone=True), nullable=True),

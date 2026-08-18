@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence
 if TYPE_CHECKING:
     from app.services.deepseek import DeepSeekConversation
 
+from sqlalchemy import func
+
 from app.db import get_db
 from app.schemas.experience_db import Challenge, ExperienceDatabase, ProductEntry, Project
 from app.services import vector_search
@@ -796,27 +798,180 @@ async def extract_experience(
 # --- persistence ------------------------------------------------------------
 
 
-def save_experience(job_id: str, payload: dict[str, Any]) -> None:
-    with get_db() as conn:
+# --- persistence ------------------------------------------------------------
+#
+# What used to be one JSON blob per job is now a run, its two roles, and their
+# bullets. The dict the router returns is unchanged, so the frontend never sees
+# the difference — but "which challenge produced this claim" and "how long did
+# the run take" became queries instead of parsing exercises.
+
+
+def _store_run(conn, job_row, payload: dict[str, Any]) -> None:
+    from sqlalchemy import delete as sql_delete
+
+    from app.ids import uuid7
+    from app.models import (
+        extraction_bullets,
+        extraction_roles,
+        extraction_runs,
+        extraction_skills,
+    )
+
+    # One run per job: re-extracting replaces rather than accumulating, which
+    # matches what the single-row upsert used to do.
+    conn.execute(sql_delete(extraction_runs).where(extraction_runs.c.job_id == job_row.id))
+
+    search = payload.get("search") or {}
+    run_id = conn.execute(
+        extraction_runs.insert()
+        .values(
+            id=uuid7(),
+            job_id=job_row.id,
+            user_id=job_row.user_id,
+            state="succeeded",
+            summary=payload.get("summary") or "",
+            generator=payload.get("generator") or "fallback",
+            search_mode=search.get("mode") or "lexical",
+            search_model=search.get("model") or "",
+            provider_turns=int(payload.get("deepseekTurns") or 0),
+            finished_at=func.now(),
+        )
+        .returning(extraction_runs.c.id)
+    ).scalar_one()
+
+    for slot in ("job1", "job2"):
+        selection = payload.get(slot) or {}
+        if not selection:
+            continue
+        role_id = conn.execute(
+            extraction_roles.insert()
+            .values(
+                id=uuid7(),
+                run_id=run_id,
+                slot=slot,
+                # The corpus still lives in database.json, so there is no row to
+                # point at yet. The names carry the meaning until it moves.
+                company_id=None,
+                product_id=None,
+                company_name=selection.get("company") or "",
+                product_name=selection.get("product") or "",
+                timeline=selection.get("timeline") or "",
+            )
+            .returning(extraction_roles.c.id)
+        ).scalar_one()
+
+        bullets = [b for b in (selection.get("bullets") or []) if b]
+        if bullets:
+            conn.execute(
+                extraction_bullets.insert(),
+                [
+                    {
+                        "id": uuid7(),
+                        "role_id": role_id,
+                        "position": index,
+                        "text": text_value,
+                        "source_challenge_id": None,
+                    }
+                    for index, text_value in enumerate(bullets)
+                ],
+            )
+
+    skills = [s for s in (payload.get("skills") or []) if s]
+    if skills:
         conn.execute(
-            "INSERT INTO job_experience (job_id, payload_json, updated_at)"
-            " VALUES (?, ?, ?)"
-            " ON CONFLICT(job_id) DO UPDATE SET"
-            "   payload_json = excluded.payload_json, updated_at = excluded.updated_at",
-            (job_id, json.dumps(payload), _now()),
+            extraction_skills.insert(),
+            [
+                {"run_id": run_id, "name": name, "position": index}
+                for index, name in enumerate(dict.fromkeys(skills))
+            ],
         )
 
 
-def get_experience(job_id: str) -> dict[str, Any] | None:
+def _load_run(conn, job_row) -> dict[str, Any] | None:
+    from sqlalchemy import select
+
+    from app.models import extraction_bullets, extraction_roles, extraction_runs
+
+    run = conn.execute(
+        select(extraction_runs)
+        .where(extraction_runs.c.job_id == job_row.id)
+        .order_by(extraction_runs.c.started_at.desc())
+        .limit(1)
+    ).first()
+    if run is None:
+        return None
+
+    payload: dict[str, Any] = {
+        "job1": {},
+        "job2": {},
+        "summary": run.summary,
+        "summarySource": "deepseek" if run.summary else "none",
+        "search": {"mode": run.search_mode, "model": run.search_model or None,
+                   "detail": None},
+        "generator": run.generator,
+        "deepseekTurns": run.provider_turns,
+        "extractedAt": run.finished_at.isoformat() if run.finished_at else "",
+    }
+
+    for role in conn.execute(
+        select(extraction_roles).where(extraction_roles.c.run_id == run.id)
+    ):
+        bullets = [
+            r.text
+            for r in conn.execute(
+                select(extraction_bullets.c.text)
+                .where(extraction_bullets.c.role_id == role.id)
+                .order_by(extraction_bullets.c.position)
+            )
+        ]
+        payload[role.slot] = {
+            "company": role.company_name,
+            "product": role.product_name,
+            "timeline": role.timeline,
+            "projects": [],
+            "bullets": bullets,
+            "source_challenge_ids": [],
+        }
+    return payload
+
+
+def save_experience(job_id: str, payload: dict[str, Any]) -> None:
+    from app.services import job_store
+
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT payload_json FROM job_experience WHERE job_id = ?", (job_id,)
-        ).fetchone()
-    return json.loads(row["payload_json"]) if row else None
+        job_row = job_store._find(conn, job_id)
+        if job_row is None:
+            # An extraction with no job to hang off cannot be stored now that
+            # the foreign key is real. The caller already has the result.
+            progress.emit(
+                "done",
+                "Extraction finished but the job is no longer stored, so it was not saved",
+                level="warn",
+            )
+            return
+        _store_run(conn, job_row, payload)
+
+
+def get_experience(job_id: str) -> dict[str, Any] | None:
+    from app.services import job_store
+
+    with get_db() as conn:
+        job_row = job_store._find(conn, job_id)
+        if job_row is None:
+            return None
+        return _load_run(conn, job_row)
 
 
 def all_experience() -> dict[str, dict[str, Any]]:
     """Every stored extraction, so the table can restore badges after reload."""
+    from sqlalchemy import select
+
+    from app.models import jobs as jobs_table
+
+    out: dict[str, dict[str, Any]] = {}
     with get_db() as conn:
-        rows = conn.execute("SELECT job_id, payload_json FROM job_experience").fetchall()
-    return {r["job_id"]: json.loads(r["payload_json"]) for r in rows}
+        for job_row in conn.execute(select(jobs_table)):
+            found = _load_run(conn, job_row)
+            if found is not None:
+                out[str(job_row.id)] = found
+    return out
