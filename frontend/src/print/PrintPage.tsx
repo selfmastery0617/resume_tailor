@@ -18,6 +18,8 @@ interface RenderPayload {
   rendererKey: string;
   data: ResumeData;
   style: ResumeStyle;
+  /** Present for user templates; the layout-v1 renderer needs it. */
+  layout?: unknown;
 }
 
 export function PrintPage() {
@@ -84,7 +86,7 @@ export function PrintPage() {
 
   return (
     <div {...(ready ? { "data-pdf-ready": "true" } : {})}>
-      <Renderer data={payload.data} style={payload.style} />
+      <Renderer data={payload.data} style={payload.style} layout={payload.layout} />
     </div>
   );
 }

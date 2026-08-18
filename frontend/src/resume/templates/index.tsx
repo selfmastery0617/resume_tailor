@@ -12,6 +12,7 @@
  */
 
 import type { ReactElement } from "react";
+import { LayoutRenderer, type TemplateLayout } from "../LayoutRenderer";
 import { ResumeDocument, type TemplateChrome } from "../ResumeDocument";
 import type { TemplateRendererProps } from "../types";
 
@@ -40,6 +41,14 @@ export const Template8 = makeRenderer({
 export const Template9 = makeRenderer({ headingStyle: "rule", headerAccentBar: true });
 export const Template10 = makeRenderer({ headingStyle: "boxed", headingTransform: "uppercase" });
 
+/** User-built templates. Renders the layout document supplied alongside the
+ *  data; falls back to the default renderer if a layout is somehow missing so a
+ *  malformed record never blanks the page. */
+export function LayoutTemplate({ data, style, layout }: TemplateRendererProps): ReactElement {
+  if (!layout) return <ResumeDocument data={data} style={style} />;
+  return <LayoutRenderer data={data} style={style} layout={layout as TemplateLayout} />;
+}
+
 export const RENDERERS: Record<string, (props: TemplateRendererProps) => ReactElement> = {
   "renderer-1": Template1,
   "renderer-2": Template2,
@@ -51,6 +60,7 @@ export const RENDERERS: Record<string, (props: TemplateRendererProps) => ReactEl
   "renderer-8": Template8,
   "renderer-9": Template9,
   "renderer-10": Template10,
+  "layout-v1": LayoutTemplate,
 };
 
 export const DEFAULT_RENDERER_KEY = "renderer-1";

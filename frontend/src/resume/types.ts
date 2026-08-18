@@ -122,6 +122,11 @@ export interface TemplateDefinition {
   rendererKey: string;
   defaultStyle: Partial<ResumeStyle>;
   supportedStyleFields: string[];
+  /** 'builtin' templates are source-controlled and read-only in the builder. */
+  source: "builtin" | "user";
+  /** Layout document; present only for user templates. */
+  layout?: unknown;
+  ownerProfileId?: string | null;
 }
 
 export interface ProfileTemplateSettings {
@@ -133,8 +138,14 @@ export interface ProfileTemplateSettings {
   updatedAt: string;
 }
 
-/** The contract every template renderer implements (TM-FR-003). */
+/** The contract every template renderer implements (TM-FR-003).
+ *
+ *  `layout` is only supplied for user-built templates (rendererKey
+ *  "layout-v1"); the ten built-in renderers ignore it. Keeping it optional
+ *  means the contract stays uniform and callers need no branching.
+ */
 export interface TemplateRendererProps {
   data: ResumeData;
   style: ResumeStyle;
+  layout?: unknown;
 }
