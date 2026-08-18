@@ -11,4 +11,15 @@ export interface Job {
   match_score?: string | null;
   description?: string | null;
   skills?: string | null;
+
+  // -- persisted state (jobs are stored server-side now) -------------------
+  source?: string;
+  application_status?: "not_applied" | "applied";
+  /** ISO timestamp, null until the job is marked applied. */
+  applied_at?: string | null;
+  applied?: boolean;
+  /** Nothing may act on a locked job: no extraction, no generation. */
+  locked?: boolean;
+  first_seen_at?: string;
+  last_seen_at?: string;
 }

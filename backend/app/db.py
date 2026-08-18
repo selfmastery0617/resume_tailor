@@ -82,6 +82,43 @@ CREATE TABLE IF NOT EXISTS template_definitions (
 
 CREATE INDEX IF NOT EXISTS idx_template_defs_active ON template_definitions(active);
 
+-- Imported job listings. These used to live only in React state, which is why
+-- job_experience and job_resume were keyed by an id with no row behind it and
+-- the table emptied on every reload.
+--
+-- The id is the source's own id rather than a generated one, so the extraction
+-- and resume rows already keyed by it keep working untouched.
+--
+-- Column shape deliberately mirrors the Postgres design in docs/database.md, so
+-- moving over later is a data copy rather than a redesign.
+CREATE TABLE IF NOT EXISTS jobs (
+    id                 TEXT PRIMARY KEY,
+    source             TEXT NOT NULL DEFAULT 'jobright',
+    title              TEXT NOT NULL DEFAULT '',
+    company            TEXT NOT NULL DEFAULT '',
+    location           TEXT NOT NULL DEFAULT '',
+    url                TEXT NOT NULL DEFAULT '',
+    description        TEXT NOT NULL DEFAULT '',
+    salary             TEXT NOT NULL DEFAULT '',
+    work_model         TEXT NOT NULL DEFAULT '',
+    match_score        TEXT NOT NULL DEFAULT '',
+    publish_time       TEXT NOT NULL DEFAULT '',
+    publish_time_desc  TEXT NOT NULL DEFAULT '',
+    skills             TEXT NOT NULL DEFAULT '',
+    -- What the user did in the outside world. Separate from whatever the
+    -- pipeline has done, so marking a job applied cannot erase the fact that a
+    -- resume was generated for it.
+    application_status TEXT NOT NULL DEFAULT 'not_applied'
+                       CHECK (application_status IN ('not_applied', 'applied')),
+    applied_at         TEXT,
+    first_seen_at      TEXT NOT NULL,
+    last_seen_at       TEXT NOT NULL,
+    -- Neither field can contradict the other in either direction.
+    CHECK ((application_status = 'not_applied') = (applied_at IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(application_status);
+
 -- Extracted experience per imported job. Keyed by the job's own id (from the
 -- import source) because job rows themselves live in browser state; this is
 -- what makes an extraction survive a page refresh.

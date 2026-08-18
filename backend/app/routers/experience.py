@@ -106,6 +106,17 @@ def get_extraction(job_id: str):
 
 @router.post("/extract")
 async def extract(payload: ExtractRequest):
+    # An applied job is a record of what was sent. Re-extracting would rewrite
+    # the bullets behind a submitted application, so the lock is enforced here
+    # rather than relying on the button being disabled.
+    from app.services import job_store
+
+    if job_store.is_locked(payload.jobId):
+        raise _bad_request(
+            "JOB_LOCKED",
+            "This job is marked applied, so its experience can no longer be changed.",
+        )
+
     first_company = (settings_service.get_settings().get("firstCompany") or "").strip()
     if not first_company:
         raise _bad_request(

@@ -8,7 +8,7 @@ import {
   type ColDef,
   type GridApi,
 } from "ag-grid-community";
-import { importJobs } from "./api/jobs";
+import { deleteJob, fetchJobs, importJobs, markJobApplied } from "./api/jobs";
 import type { Job } from "./types/job";
 import { DescriptionCellRenderer } from "./components/DescriptionCellRenderer";
 import { InfoModal } from "./components/InfoModal";
@@ -28,6 +28,10 @@ import {
   ResumeCellRenderer,
   type ResumeGridContext,
 } from "./components/ResumeCellRenderer";
+import {
+  JobActionsCellRenderer,
+  type JobActionsGridContext,
+} from "./components/JobActionsCellRenderer";
 import { TemplatesPage } from "./pages/TemplatesPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ProfilePage } from "./pages/ProfilePage";
@@ -79,6 +83,10 @@ function App() {
   const [experienceResults, setExperienceResults] = useState<Record<string, ExperienceResult>>({});
   const [resumeGenerating, setResumeGenerating] = useState<Map<string, number>>(new Map());
   const [resumeResults, setResumeResults] = useState<Record<string, TailoredResume>>({});
+  const [jobActionBusy, setJobActionBusy] = useState<Map<string, "applying" | "deleting">>(
+    new Map(),
+  );
+  const [notice, setNotice] = useState<string | null>(null);
   const [showConsole, setShowConsole] = useState(false);
   const [deepSeekConnected, setDeepSeekConnected] = useState(false);
   const [activeTab, setActiveTab] = useState<
@@ -90,13 +98,19 @@ function App() {
   // Skills column has to be refreshed explicitly for the loading indicator to
   // mount and unmount.
   useEffect(() => {
-    gridApiRef.current?.refreshCells({ columns: ["resume"], force: true });
-  }, [experienceExtracting, experienceResults, resumeGenerating, resumeResults]);
+    gridApiRef.current?.refreshCells({ columns: ["resume", "actions"], force: true });
+  }, [experienceExtracting, experienceResults, resumeGenerating, resumeResults, jobActionBusy]);
 
-  // Restore badges for jobs extracted or generated in an earlier session.
+  // Jobs are stored server-side now, so the table fills itself without needing
+  // an import — along with the badges for anything extracted or generated.
   useEffect(() => {
     if (activeTab !== "jobs") return;
     (async () => {
+      try {
+        setJobs(await fetchJobs());
+      } catch {
+        /* an unreachable backend shows as the import error instead */
+      }
       try {
         setExperienceResults(await fetchAllExperience());
       } catch {
@@ -152,9 +166,23 @@ function App() {
         filter: false,
         cellRenderer: ResumeCellRenderer,
       },
+      {
+        headerName: "Actions",
+        colId: "actions",
+        // Fits "✅ Applied 12/31/2026" plus the delete button without clipping.
+        width: 215,
+        sortable: false,
+        filter: false,
+        cellRenderer: JobActionsCellRenderer,
+      },
     ],
     [],
   );
+
+  // An applied job is a record of what was sent, so the whole row is greyed to
+  // say so at a glance rather than only its buttons.
+  const getRowClass = (params: { data?: Job }) =>
+    params.data?.applied ? "job-row--applied" : undefined;
 
   const handleImportJobs = async () => {
     setLoading(true);
@@ -231,12 +259,86 @@ function App() {
     }
   };
 
-  const gridContext: ResumeGridContext = {
+  const setBusy = (jobId: string, action: "applying" | "deleting" | null) =>
+    setJobActionBusy((prev) => {
+      const next = new Map(prev);
+      if (action) next.set(jobId, action);
+      else next.delete(jobId);
+      return next;
+    });
+
+  const handleMarkApplied = async (job: Job) => {
+    // Confirmed because it is one-way: the row freezes and the bullets behind a
+    // submitted application can no longer be rewritten. A mis-click should not
+    // cost that.
+    const ok = window.confirm(
+      `Mark "${job.title}" at ${job.company} as applied?\n\n` +
+        "This locks the row — its experience and resume can no longer be regenerated.",
+    );
+    if (!ok) return;
+
+    setBusy(job.id, "applying");
+    setError(null);
+    setNotice(null);
+    try {
+      const updated = await markJobApplied(job.id);
+      setJobs((prev) => prev.map((j) => (j.id === job.id ? updated : j)));
+      setNotice(`Marked "${updated.title}" as applied.`);
+    } catch (err) {
+      setError(describeError(err, "Could not mark the job as applied."));
+    } finally {
+      setBusy(job.id, null);
+    }
+  };
+
+  const handleDeleteJob = async (job: Job) => {
+    const hasResume = Boolean(resumeResults[job.id]);
+    const ok = window.confirm(
+      `Delete "${job.title}" at ${job.company}?\n\n` +
+        "This removes the job, its extracted experience and its resume record." +
+        (hasResume ? "\n\nThe PDF already saved to your output folder is kept." : ""),
+    );
+    if (!ok) return;
+
+    setBusy(job.id, "deleting");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await deleteJob(job.id);
+      setJobs((prev) => prev.filter((j) => j.id !== job.id));
+      // Drop the derived state too, or a re-import of the same listing would
+      // show a badge for an extraction that no longer exists.
+      setExperienceResults((prev) => {
+        const next = { ...prev };
+        delete next[job.id];
+        return next;
+      });
+      setResumeResults((prev) => {
+        const next = { ...prev };
+        delete next[job.id];
+        return next;
+      });
+      setNotice(
+        result.orphanedFile
+          ? `Deleted "${result.title}". Its PDF is still at ${result.orphanedFile}`
+          : `Deleted "${result.title}".`,
+      );
+    } catch (err) {
+      setError(describeError(err, "Could not delete the job."));
+    } finally {
+      setBusy(job.id, null);
+    }
+  };
+
+  const gridContext: ResumeGridContext & JobActionsGridContext = {
     experienceExtracting,
     experienceResults,
     resumeGenerating,
     resumeResults,
     onGenerateResume: handleGenerateResume,
+    jobActionBusy,
+    onMarkApplied: handleMarkApplied,
+    onDeleteJob: handleDeleteJob,
   };
 
   const NAV: { id: typeof activeTab; label: string; icon: string }[] = [
@@ -311,6 +413,7 @@ function App() {
         {loading ? "Importing..." : "Import Jobs"}
       </button>
       {error && <p className="error">{error}</p>}
+      {notice && <p className="notice">{notice}</p>}
       {/* The connection panel and prompt editor moved to Settings; this page
           reads both, and only surfaces a pointer when something is missing. */}
       {!deepSeekConnected && (
@@ -325,6 +428,8 @@ function App() {
           columnDefs={columnDefs}
           theme={resolvedTheme === "dark" ? gridThemeDark : gridThemeLight}
           context={gridContext}
+          getRowId={(params) => params.data.id}
+          getRowClass={getRowClass}
           onGridReady={(event) => {
             gridApiRef.current = event.api;
           }}
