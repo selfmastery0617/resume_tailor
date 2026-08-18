@@ -57,7 +57,66 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- User-created templates. The ten built-ins stay source-controlled in
+-- services/templates/registry.py and are never written here, so TM-FR-005
+-- ("user edits do not rewrite source-controlled template files") still holds.
+CREATE TABLE IF NOT EXISTS template_definitions (
+    id                 TEXT PRIMARY KEY,
+    name               TEXT NOT NULL,
+    description        TEXT NOT NULL DEFAULT '',
+    -- Bumped on every save so generated_resumes can pin an exact revision.
+    version            INTEGER NOT NULL DEFAULT 1,
+    active             INTEGER NOT NULL DEFAULT 1,
+    renderer_key       TEXT NOT NULL DEFAULT 'layout-v1',
+    source             TEXT NOT NULL DEFAULT 'user'
+                       CHECK (source IN ('builtin', 'user')),
+    layout_json        TEXT NOT NULL,
+    default_style_json TEXT NOT NULL DEFAULT '{}',
+    -- NULL = available to every profile.
+    owner_profile_id   TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    FOREIGN KEY (owner_profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_template_defs_active ON template_definitions(active);
+
+-- Extracted experience per imported job. Keyed by the job's own id (from the
+-- import source) because job rows themselves live in browser state; this is
+-- what makes an extraction survive a page refresh.
+CREATE TABLE IF NOT EXISTS job_experience (
+    job_id       TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+-- The tailored PDF written to the output folder for a job. Keyed by job id like
+-- job_experience, so the table can re-attach the file to its row after a
+-- refresh. Regenerating overwrites the row and the file on disk.
+CREATE TABLE IF NOT EXISTS job_resume (
+    job_id       TEXT PRIMARY KEY,
+    profile_id   TEXT,
+    profile_name TEXT NOT NULL DEFAULT '',
+    template_id  TEXT NOT NULL DEFAULT '',
+    folder       TEXT NOT NULL,
+    file_name    TEXT NOT NULL,
+    file_path    TEXT NOT NULL,
+    page_count   INTEGER NOT NULL DEFAULT 0,
+    byte_size    INTEGER NOT NULL DEFAULT 0,
+    generated_at TEXT NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
+);
 """
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS will not add
+# them to an existing database, so they are applied separately.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # A user template is mutable, so pinning only (template_id, version) would
+    # let an edit retroactively change what a past PDF was rendered from.
+    # Snapshotting the layout keeps generated resumes reproducible (US-RG-02).
+    ("generated_resumes", "layout_snapshot_json", "TEXT NOT NULL DEFAULT '{}'"),
+)
 
 
 def _connect() -> sqlite3.Connection:
@@ -86,6 +145,34 @@ def get_db() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def init_db() -> None:
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> list[str]:
+    """Add columns missing from an existing database. Idempotent."""
+    applied: list[str] = []
+    for table, column, ddl in MIGRATIONS:
+        if _table_exists(conn, table) and not _has_column(conn, table, column):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            applied.append(f"{table}.{column}")
+    return applied
+
+
+def init_db() -> list[str]:
+    """Create missing tables and apply column migrations.
+
+    Returns the migrations applied, so startup can log a schema change rather
+    than silently altering the user's database.
+    """
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        return _apply_migrations(conn)
