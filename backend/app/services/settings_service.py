@@ -6,6 +6,7 @@ read the tailoring prompt and output folder from.
 """
 
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -115,11 +116,53 @@ def check_folder(path_text: str) -> dict[str, Any]:
 
     # Writability is what actually matters, and it can't be inferred reliably
     # from permissions on Windows — so test it directly.
-    probe = path / ".jobtailor-write-test"
     try:
-        probe.touch()
-        probe.unlink()
+        # A unique temporary file avoids colliding with or deleting a file the
+        # user may already have created with a fixed probe name.
+        with tempfile.NamedTemporaryFile(prefix=".jobtailor-write-test-", dir=path):
+            pass
     except OSError as exc:
         return {"valid": False, "detail": f"Folder is not writable: {exc.strerror or exc}"}
 
     return {"valid": True, "detail": f"Ready to save into {path}", "resolved": str(path)}
+
+
+def _show_folder_dialog(initial_directory: Path) -> str:
+    """Open the host operating system's native directory chooser."""
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+        root.update_idletasks()
+        return str(
+            filedialog.askdirectory(
+                parent=root,
+                title="Select JobTailor output folder",
+                initialdir=str(initial_directory),
+                mustexist=True,
+            )
+            or ""
+        )
+    finally:
+        root.destroy()
+
+
+def select_folder(initial_path: str | None = None) -> dict[str, Any]:
+    """Open a folder chooser and validate the selected directory immediately."""
+    initial = Path(initial_path).expanduser() if initial_path else Path.home()
+    if not initial.exists() or not initial.is_dir():
+        initial = Path.home()
+
+    selected = _show_folder_dialog(initial)
+    if not selected:
+        return {
+            "cancelled": True,
+            "valid": False,
+            "detail": "Folder selection cancelled.",
+        }
+
+    result = check_folder(selected)
+    return {"cancelled": False, **result}

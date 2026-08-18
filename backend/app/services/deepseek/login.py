@@ -19,7 +19,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .session import DEEPSEEK_ORIGIN, DEFAULT_SESSION_PATH, USER_TOKEN_KEY
+from .session import (
+    DEEPSEEK_ORIGIN,
+    DEFAULT_SESSION_PATH,
+    USER_TOKEN_KEY,
+    has_usable_user_token,
+)
 
 LoginStatus = Literal["idle", "opening", "waiting", "success", "failed", "cancelled"]
 
@@ -118,14 +123,22 @@ def _run_login_sync() -> None:
                     token = page.evaluate(
                         "key => window.localStorage.getItem(key)", USER_TOKEN_KEY
                     )
+                    on_login_page = "/sign_in" in page.url or "/login" in page.url
+                    has_chat_input = (
+                        page.locator("textarea#chat-input, textarea").count() > 0
+                    )
                 except PlaywrightError:
                     # Navigating/reloading mid-evaluate; just try again.
                     token = None
+                    on_login_page = True
+                    has_chat_input = False
 
-                if token:
+                # The logged-out app stores a truthy JSON wrapper whose value
+                # is null. Require real auth data and the chat UI before saving.
+                if has_usable_user_token(token) and not on_login_page and has_chat_input:
                     DEFAULT_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
                     context.storage_state(path=str(DEFAULT_SESSION_PATH))
-                    _state.set("success", "Signed in to DeepSeek. You can close the window.")
+                    _state.set("success", "Signed in to DeepSeek and verified the chat screen.")
                     browser.close()
                     return
 

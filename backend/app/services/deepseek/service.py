@@ -161,17 +161,15 @@ class DeepSeekService:
 
         if any(marker in page.url for marker in LOGIN_URL_MARKERS):
             raise DeepSeekAuthError(
-                "DeepSeek redirected to the login page — the exported session has "
-                "expired. Re-run scripts/capture_deepseek_session.py to refresh it "
-                "(see docs/deepseek-session.md)."
+                "DeepSeek rejected the saved session and redirected to sign-in. "
+                "Open Settings and select Connect DeepSeek to sign in again."
             )
 
         if page.locator(CHAT_INPUT_SELECTOR).count() == 0:
             raise DeepSeekAuthError(
-                "DeepSeek chat input not found — the session is likely expired, or "
-                "a Cloudflare check is blocking headless access. Re-run "
-                "scripts/capture_deepseek_session.py, or set DEEPSEEK_HEADLESS=false "
-                "to solve the check in a visible window. See docs/deepseek-session.md."
+                "DeepSeek chat input not found. The session may be invalid, or a "
+                "Cloudflare check may be blocking headless access. Reconnect from "
+                "Settings; if it persists, set DEEPSEEK_HEADLESS=false in backend/.env."
             )
 
     @staticmethod
