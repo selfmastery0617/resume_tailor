@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import axios from "axios";
 import { AgGridReact } from "ag-grid-react";
 import {
   ModuleRegistry,
@@ -9,19 +8,32 @@ import {
   type ColDef,
   type GridApi,
 } from "ag-grid-community";
-import { extractSkills, importJobs } from "./api/jobs";
+import { importJobs } from "./api/jobs";
 import type { Job } from "./types/job";
 import { DescriptionCellRenderer } from "./components/DescriptionCellRenderer";
 import { InfoModal } from "./components/InfoModal";
 import { UrlCellRenderer } from "./components/UrlCellRenderer";
-import { SkillsCellRenderer, type SkillsGridContext } from "./components/SkillsCellRenderer";
 import { fetchSessionStatus } from "./api/deepseek";
-import { fetchSettings } from "./api/settings";
+import {
+  extractExperience,
+  fetchAllExperience,
+  type ExperienceResult,
+} from "./api/experience";
+import {
+  fetchAllTailoredResumes,
+  generateTailoredResume,
+  type TailoredResume,
+} from "./api/resumes";
+import {
+  ResumeCellRenderer,
+  type ResumeGridContext,
+} from "./components/ResumeCellRenderer";
 import { TemplatesPage } from "./pages/TemplatesPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ProfilePage } from "./pages/ProfilePage";
+import { TemplateBuilderPage } from "./pages/TemplateBuilderPage";
 import { ThemeToggle, useResolvedTheme } from "./components/ThemeToggle";
-import { DEFAULT_SKILLS_PROMPT } from "./constants/prompts";
+import { ProgressConsole } from "./components/ProgressConsole";
 import "./App.css";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -57,36 +69,20 @@ const gridThemeDark = themeQuartz.withPart(colorSchemeDark).withParams({
   wrapperBorderRadius: "8px",
 });
 
-/** Turn an extract-skills failure into something actionable.
- *  401 specifically means the exported DeepSeek session has expired. */
-function describeExtractError(err: unknown): string {
-  if (axios.isAxiosError(err)) {
-    if (!err.response) {
-      return "Could not reach the backend. Is it running on port 8000?";
-    }
-    if (err.response.status === 401) {
-      return "DeepSeek session expired. Re-run scripts/capture_deepseek_session.py to refresh it.";
-    }
-    const detail = (err.response.data as { detail?: string } | undefined)?.detail;
-    if (detail) return detail;
-  }
-  return "Failed to extract skills. Check the backend logs for details.";
-}
-
 function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [descriptionModalJob, setDescriptionModalJob] = useState<Job | null>(null);
-  const [skillsModalJob, setSkillsModalJob] = useState<Job | null>(null);
-  // The prompt now lives in Settings (persisted); Jobs just reads it.
-  const [prompt, setPrompt] = useState(DEFAULT_SKILLS_PROMPT);
-  // job id -> epoch ms the extraction started, so each row can show elapsed time.
-  const [extractingSince, setExtractingSince] = useState<Map<string, number>>(new Map());
   const gridApiRef = useRef<GridApi<Job> | null>(null);
+  const [experienceExtracting, setExperienceExtracting] = useState<Map<string, number>>(new Map());
+  const [experienceResults, setExperienceResults] = useState<Record<string, ExperienceResult>>({});
+  const [resumeGenerating, setResumeGenerating] = useState<Map<string, number>>(new Map());
+  const [resumeResults, setResumeResults] = useState<Record<string, TailoredResume>>({});
+  const [showConsole, setShowConsole] = useState(false);
   const [deepSeekConnected, setDeepSeekConnected] = useState(false);
   const [activeTab, setActiveTab] = useState<
-    "jobs" | "profile" | "templates" | "settings"
+    "jobs" | "profile" | "templates" | "builder" | "settings"
   >("jobs");
   const resolvedTheme = useResolvedTheme();
 
@@ -94,26 +90,38 @@ function App() {
   // Skills column has to be refreshed explicitly for the loading indicator to
   // mount and unmount.
   useEffect(() => {
-    gridApiRef.current?.refreshCells({ columns: ["skills"], force: true });
-  }, [extractingSince, deepSeekConnected]);
+    gridApiRef.current?.refreshCells({ columns: ["resume"], force: true });
+  }, [experienceExtracting, experienceResults, resumeGenerating, resumeResults]);
 
-  // Pull the prompt and connection state from Settings each time this tab is
-  // shown, so changes made there take effect without a page reload.
+  // Restore badges for jobs extracted or generated in an earlier session.
+  useEffect(() => {
+    if (activeTab !== "jobs") return;
+    (async () => {
+      try {
+        setExperienceResults(await fetchAllExperience());
+      } catch {
+        /* leave badges absent if the store is unreachable */
+      }
+      try {
+        setResumeResults(await fetchAllTailoredResumes());
+      } catch {
+        /* same: a missing store only costs the badge */
+      }
+    })();
+  }, [activeTab]);
+
+  // Prompts live in Settings and are read server-side during extraction; this
+  // only needs the connection state to gate the Extract button.
   useEffect(() => {
     if (activeTab !== "jobs") return;
     let cancelled = false;
     (async () => {
-      const [settingsResult, sessionResult] = await Promise.allSettled([
-        fetchSettings(),
-        fetchSessionStatus(),
-      ]);
-      if (cancelled) return;
-      if (settingsResult.status === "fulfilled" && settingsResult.value.skillsPrompt) {
-        setPrompt(settingsResult.value.skillsPrompt);
+      try {
+        const session = await fetchSessionStatus();
+        if (!cancelled) setDeepSeekConnected(session.connected);
+      } catch {
+        if (!cancelled) setDeepSeekConnected(false);
       }
-      setDeepSeekConnected(
-        sessionResult.status === "fulfilled" ? sessionResult.value.connected : false,
-      );
     })();
     return () => {
       cancelled = true;
@@ -137,12 +145,12 @@ function App() {
         cellRendererParams: { onView: setDescriptionModalJob },
       },
       {
-        headerName: "Skills",
-        field: "skills",
-        width: 220,
+        headerName: "Resume",
+        colId: "resume",
+        width: 230,
         sortable: false,
         filter: false,
-        cellRenderer: SkillsCellRenderer,
+        cellRenderer: ResumeCellRenderer,
       },
     ],
     [],
@@ -163,16 +171,32 @@ function App() {
     }
   };
 
-  const handleExtractSkills = async (job: Job) => {
-    setExtractingSince((prev) => new Map(prev).set(job.id, Date.now()));
-    setError(null);
+  const describeError = (err: unknown, fallback: string) =>
+    // The backend names the exact fix (no output folder, no profile, no
+    // extraction), so prefer its message over a generic failure.
+    (err as { response?: { data?: { detail?: { message?: string } } } }).response?.data?.detail
+      ?.message ?? fallback;
+
+  /** Step 1 of the Resume button: extract, unless this job already has one. */
+  const ensureExperience = async (job: Job) => {
+    if (experienceResults[job.id]) return true;
+
+    setExperienceExtracting((prev) => new Map(prev).set(job.id, Date.now()));
     try {
-      const skills = await extractSkills(job.description ?? "", prompt);
-      setJobs((prev) => prev.map((j) => (j.id === job.id ? { ...j, skills } : j)));
+      const result = await extractExperience({
+        jobId: job.id,
+        jobDescription: job.description ?? "",
+        jobTitle: job.title,
+        // Skills are derived server-side as step 1 of the pipeline and reported
+        // in the console, so nothing is passed from the table.
+      });
+      setExperienceResults((prev) => ({ ...prev, [job.id]: result }));
+      return true;
     } catch (err) {
-      setError(describeExtractError(err));
+      setError(describeError(err, "Could not extract experience. Check the backend logs."));
+      return false;
     } finally {
-      setExtractingSince((prev) => {
+      setExperienceExtracting((prev) => {
         const next = new Map(prev);
         next.delete(job.id);
         return next;
@@ -180,17 +204,46 @@ function App() {
     }
   };
 
-  const gridContext: SkillsGridContext = {
-    extractingSince,
-    connected: deepSeekConnected,
-    onExtractSkills: handleExtractSkills,
-    onViewSkills: setSkillsModalJob,
+  const handleGenerateResume = async (job: Job) => {
+    setError(null);
+    // The bullets and the summary are only shown in the console now, so open it
+    // rather than running a minute of work behind a collapsed panel.
+    setShowConsole(true);
+
+    if (!(await ensureExperience(job))) return;
+
+    setResumeGenerating((prev) => new Map(prev).set(job.id, Date.now()));
+    try {
+      const saved = await generateTailoredResume({
+        jobId: job.id,
+        company: job.company,
+        jobTitle: job.title,
+      });
+      setResumeResults((prev) => ({ ...prev, [job.id]: saved }));
+    } catch (err) {
+      setError(describeError(err, "Could not generate the resume PDF. Check the backend logs."));
+    } finally {
+      setResumeGenerating((prev) => {
+        const next = new Map(prev);
+        next.delete(job.id);
+        return next;
+      });
+    }
+  };
+
+  const gridContext: ResumeGridContext = {
+    experienceExtracting,
+    experienceResults,
+    resumeGenerating,
+    resumeResults,
+    onGenerateResume: handleGenerateResume,
   };
 
   const NAV: { id: typeof activeTab; label: string; icon: string }[] = [
     { id: "jobs", label: "Jobs", icon: "📋" },
     { id: "profile", label: "Profile", icon: "👤" },
     { id: "templates", label: "Templates", icon: "🎨" },
+    { id: "builder", label: "Builder", icon: "🧩" },
     { id: "settings", label: "Settings", icon: "⚙️" },
   ];
 
@@ -219,6 +272,15 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
+          <button
+            type="button"
+            className={`console-toggle${showConsole ? " console-toggle--on" : ""}`}
+            onClick={() => setShowConsole((v) => !v)}
+            aria-pressed={showConsole}
+          >
+            <span aria-hidden="true">🖥️</span>
+            <span>Console</span>
+          </button>
           <ThemeToggle />
         </div>
       </aside>
@@ -232,6 +294,10 @@ function App() {
 
       <div hidden={activeTab !== "templates"}>
         <TemplatesPage active={activeTab === "templates"} />
+      </div>
+
+      <div hidden={activeTab !== "builder"}>
+        <TemplateBuilderPage active={activeTab === "builder"} />
       </div>
 
       <div hidden={activeTab !== "settings"}>
@@ -269,13 +335,10 @@ function App() {
         bodyText={descriptionModalJob?.description}
         onClose={() => setDescriptionModalJob(null)}
       />
-      <InfoModal
-        job={skillsModalJob}
-        bodyText={skillsModalJob?.skills}
-        onClose={() => setSkillsModalJob(null)}
-      />
       </div>
       </main>
+
+      {showConsole && <ProgressConsole onClose={() => setShowConsole(false)} />}
     </div>
   );
 }

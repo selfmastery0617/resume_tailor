@@ -4,7 +4,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import init_db
-from app.routers import deepseek, jobs, profiles, resumes, settings, templates
+from app.routers import (
+    deepseek,
+    experience,
+    jobs,
+    profiles,
+    resumes,
+    settings,
+    templates,
+)
 from app.services.deepseek import DeepSeekService
 
 
@@ -34,8 +42,9 @@ app.include_router(templates.router)
 app.include_router(profiles.router)
 app.include_router(resumes.router)
 app.include_router(settings.router)
+app.include_router(experience.router)
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "reload_test": True}
+    return {"status": "ok"}
