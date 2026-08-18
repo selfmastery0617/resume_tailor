@@ -6,25 +6,42 @@ schema plan; this file is the runbook.
 
 ## Getting a Postgres
 
-The schema needs **PostgreSQL 13 or newer** with two extensions:
+**PostgreSQL 13 or newer.** A stock install is enough — the base schema needs
+only `pgcrypto`, which ships with PostgreSQL as a contrib module and requires
+no download.
 
-| Extension  | Supplies                                             |
-| ---------- | ---------------------------------------------------- |
-| `pgcrypto` | `gen_random_uuid()`, the server-side default for ids |
-| `vector`   | the `vector(384)` column type and HNSW index support |
+On Windows:
 
-The first migration creates both, so the role running it needs permission to
-`CREATE EXTENSION` — on a managed host that usually means enabling them once in
-the dashboard instead.
+```powershell
+winget install --id PostgreSQL.PostgreSQL.17 --exact
+& "C:\Program Files\PostgreSQL\17\bin\createdb.exe" -U postgres jobtailor
+```
 
-Any of these work:
+Managed hosts work unchanged — **Supabase** (which also provides auth, the other
+half of the multi-user work) or **Neon**. On those, `CREATE EXTENSION` may need
+enabling in the dashboard rather than from a migration.
 
-- **Supabase** — Postgres with `vector` available; also provides auth, which is
-  the other half of the multi-user work.
-- **Neon** — plain Postgres, `vector` available.
-- **Local** — install PostgreSQL, then build or install pgvector separately.
-- **Docker** — `docker run -e POSTGRES_PASSWORD=dev -p 5432:5432 pgvector/pgvector:pg16`
-  is the shortest path, since that image ships pgvector already.
+### pgvector is optional
+
+| Extension  | Supplies                                             | Required        |
+| ---------- | ---------------------------------------------------- | --------------- |
+| `pgcrypto` | `gen_random_uuid()`, the server-side default for ids | yes             |
+| `vector`   | the `vector(384)` column type and HNSW index         | only for `0002` |
+
+Revision `0002_vector_embeddings` is split out because pgvector is a separate
+download and, on Windows, a compile step — while nothing reads those tables
+yet. Ranking encodes with sentence-transformers in Python and never asks the
+database.
+
+```bash
+python -m alembic upgrade 0001_initial_schema   # everything but embeddings
+python -m alembic upgrade head                  # including embeddings
+```
+
+Stopping at `0001` costs nothing today. Apply `0002` when similarity search
+moves into the database; it fails loudly if pgvector is missing rather than
+half-applying. `docker run -e POSTGRES_PASSWORD=dev -p 5432:5432 pgvector/pgvector:pg16`
+is the shortest route to a server that already has it.
 
 ## Configuring
 

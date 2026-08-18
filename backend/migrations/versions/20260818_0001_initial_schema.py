@@ -21,7 +21,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable, DropIndex, DropTable
 
-from app.models import REQUIRED_EXTENSIONS, metadata
+from app.models import DEFERRED_TABLES, REQUIRED_EXTENSIONS, metadata
 
 revision = "0001_initial_schema"
 down_revision = None
@@ -35,21 +35,28 @@ def _ddl(element) -> str:
     return str(element.compile(dialect=_DIALECT)).strip()
 
 
+def _tables():
+    """Everything except the tables that need pgvector.
+
+    sorted_tables resolves foreign key dependencies, so parents come first.
+    """
+    return [t for t in metadata.sorted_tables if t.name not in DEFERRED_TABLES]
+
+
 def upgrade() -> None:
-    # pgcrypto supplies gen_random_uuid() for the id defaults; vector supplies
-    # the embedding column type and the HNSW operator classes.
+    # pgcrypto supplies gen_random_uuid() for the id defaults. It ships with
+    # PostgreSQL, so this needs no download and no build.
     for extension in REQUIRED_EXTENSIONS:
         op.execute(f'CREATE EXTENSION IF NOT EXISTS "{extension}"')
 
-    # sorted_tables resolves foreign key dependencies, so parents come first.
-    for table in metadata.sorted_tables:
+    for table in _tables():
         op.execute(_ddl(CreateTable(table)))
         for index in sorted(table.indexes, key=lambda i: i.name or ""):
             op.execute(_ddl(CreateIndex(index)))
 
 
 def downgrade() -> None:
-    for table in reversed(metadata.sorted_tables):
+    for table in reversed(_tables()):
         for index in sorted(table.indexes, key=lambda i: i.name or ""):
             op.execute(_ddl(DropIndex(index)))
         op.execute(_ddl(DropTable(table)))

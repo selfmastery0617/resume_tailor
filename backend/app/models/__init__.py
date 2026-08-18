@@ -49,12 +49,22 @@ from .profiles import (
     profiles,
 )
 
-# Extensions the schema depends on. Created by the first migration.
-REQUIRED_EXTENSIONS = ("pgcrypto", "vector")
+# Extensions the base schema depends on. pgcrypto ships with PostgreSQL as a
+# contrib module, so CREATE EXTENSION works on a stock install with no build.
+REQUIRED_EXTENSIONS = ("pgcrypto",)
+
+# pgvector is a separate download and, on Windows, a compile step. Nothing reads
+# these tables yet — ranking still encodes with sentence-transformers in Python
+# and never asks the database — so they get their own migration. Run it when
+# moving similarity search into Postgres; skip it and everything else works.
+VECTOR_EXTENSION = "vector"
+DEFERRED_TABLES: tuple[str, ...] = ("challenge_embeddings",)
 
 __all__ = [
+    "DEFERRED_TABLES",
     "EMBEDDING_DIMENSIONS",
     "REQUIRED_EXTENSIONS",
+    "VECTOR_EXTENSION",
     "application_events",
     "audit_log",
     "challenge_embeddings",
