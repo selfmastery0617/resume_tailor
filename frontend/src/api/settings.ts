@@ -24,6 +24,10 @@ export interface FolderCheck {
   resolved?: string;
 }
 
+export interface FolderSelection extends FolderCheck {
+  cancelled: boolean;
+}
+
 export async function fetchSettings(): Promise<AppSettings> {
   const response = await axios.get<AppSettings>(`${BACKEND_URL}/api/settings`);
   return response.data;
@@ -38,6 +42,14 @@ export async function checkFolder(path: string): Promise<FolderCheck> {
   const response = await axios.post<FolderCheck>(`${BACKEND_URL}/api/settings/check-folder`, {
     path,
   });
+  return response.data;
+}
+
+export async function selectFolder(initialPath?: string): Promise<FolderSelection> {
+  const response = await axios.post<FolderSelection>(
+    `${BACKEND_URL}/api/settings/select-folder`,
+    { initialPath: initialPath || null },
+  );
   return response.data;
 }
 

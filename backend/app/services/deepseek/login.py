@@ -19,7 +19,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .session import DEEPSEEK_ORIGIN, DEFAULT_SESSION_PATH, USER_TOKEN_KEY
+from .session import (
+    DEEPSEEK_ORIGIN,
+    DEFAULT_SESSION_PATH,
+    USER_TOKEN_KEY,
+    has_usable_user_token,
+)
 
 LoginStatus = Literal["idle", "opening", "waiting", "success", "failed", "cancelled"]
 
@@ -92,7 +97,9 @@ def _is_signed_in(page: Any) -> bool:
     * NOT on the login page — this is what rejects the pre-auth token DeepSeek
       writes the moment it redirects to /sign_in, which used to close the window
       about four seconds after it opened.
-    * a userToken present — the credential the app actually authenticates with.
+    * a userToken carrying real auth data — DeepSeek also creates the key before
+      authentication as {"value": null, ...}, which is a truthy string, so the
+      value has to be inspected rather than merely present.
 
     The composer is treated as a bonus accelerator, not a requirement: DeepSeek
     can land on a chat, an empty state or a campaign page after login, and
@@ -105,7 +112,7 @@ def _is_signed_in(page: Any) -> bool:
         if any(marker in page.url for marker in LOGIN_URL_MARKERS):
             return False
         token = page.evaluate("key => window.localStorage.getItem(key)", USER_TOKEN_KEY)
-        return bool(token)
+        return has_usable_user_token(token)
     except PlaywrightError:
         # Navigating or reloading mid-check; try again on the next tick.
         return False
