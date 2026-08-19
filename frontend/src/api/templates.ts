@@ -38,8 +38,43 @@ export async function updateProfile(
   return response.data;
 }
 
-export async function deleteProfile(profileId: string): Promise<void> {
-  await axios.delete(`${BACKEND_URL}/api/profiles/${profileId}`);
+/** What deleting a profile would destroy. A profile owns its jobs, and
+ *  everything derived from a job hangs off that, so this is rarely small. */
+export interface ProfileDeletionImpact {
+  profileId: string;
+  name: string;
+  isDefault: boolean;
+  /** True when it is the only profile, in which case deletion is refused. */
+  isOnly: boolean;
+  jobs: number;
+  extractions: number;
+  bullets: number;
+  documents: number;
+  experiences: number;
+  /** PDFs already in the output folder; those stay on disk. */
+  filesLeftOnDisk: number;
+}
+
+export interface ProfileDeletionResult extends ProfileDeletionImpact {
+  /** Set when the deleted profile was the default and another was promoted. */
+  promoted?: string;
+  clearedResumeProfile?: boolean;
+}
+
+export async function fetchProfileDeletionImpact(
+  profileId: string,
+): Promise<ProfileDeletionImpact> {
+  const response = await axios.get<ProfileDeletionImpact>(
+    `${BACKEND_URL}/api/profiles/${profileId}/deletion-impact`,
+  );
+  return response.data;
+}
+
+export async function deleteProfile(profileId: string): Promise<ProfileDeletionResult> {
+  const response = await axios.delete<ProfileDeletionResult>(
+    `${BACKEND_URL}/api/profiles/${profileId}`,
+  );
+  return response.data;
 }
 
 export async function fetchTemplateSettings(profileId: string): Promise<ProfileTemplateSettings> {

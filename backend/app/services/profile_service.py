@@ -20,6 +20,7 @@ from app.bootstrap import current_user_id
 from app.db import get_db
 from app.ids import uuid7
 from app.models import (
+    extraction_roles,
     profile_educations,
     profile_experiences,
     profile_skills,
@@ -318,14 +319,130 @@ def update_profile(profile_id: str, payload: ProfileUpdate) -> Profile:
     return get_profile(profile_id)
 
 
-def delete_profile(profile_id: str) -> None:
+class LastProfile(RuntimeError):
+    """Refusing to delete the only profile."""
+
+
+def deletion_impact(profile_id: str) -> dict[str, Any]:
+    """What deleting this profile would destroy.
+
+    Jobs hang off a profile, and everything derived from a job hangs off that,
+    so removing a profile takes its whole pipeline with it. That is the right
+    cascade — an extraction belongs to the job it was made for — but it is far
+    more than "delete a name", so the caller is told before it happens.
+    """
+    from app.models import extraction_bullets, extraction_runs, generated_documents, jobs
+
     target = _as_uuid(profile_id)
     with get_db() as conn:
-        deleted = conn.execute(
-            delete(profiles).where(profiles.c.id == target).returning(profiles.c.id)
-        ).scalar()
-    if deleted is None:
-        raise ProfileNotFound(profile_id)
+        row = conn.execute(
+            select(profiles.c.name, profiles.c.is_default).where(profiles.c.id == target)
+        ).first()
+        if row is None:
+            raise ProfileNotFound(profile_id)
+
+        def count(query) -> int:
+            return conn.execute(query).scalar() or 0
+
+        job_ids = select(jobs.c.id).where(jobs.c.profile_id == target).scalar_subquery()
+        run_ids = (
+            select(extraction_runs.c.id)
+            .where(extraction_runs.c.job_id.in_(job_ids))
+            .scalar_subquery()
+        )
+
+        impact = {
+            "profileId": profile_id,
+            "name": row.name,
+            "isDefault": row.is_default,
+            "jobs": count(select(func.count()).select_from(jobs).where(jobs.c.profile_id == target)),
+            "extractions": count(
+                select(func.count()).select_from(extraction_runs)
+                .where(extraction_runs.c.job_id.in_(job_ids))
+            ),
+            "bullets": count(
+                select(func.count()).select_from(extraction_bullets)
+                .where(extraction_bullets.c.role_id.in_(
+                    select(extraction_roles.c.id)
+                    .where(extraction_roles.c.run_id.in_(run_ids))
+                    .scalar_subquery()
+                ))
+            ),
+            "documents": count(
+                select(func.count()).select_from(generated_documents)
+                .where(generated_documents.c.profile_id == target)
+            ),
+            "experiences": count(
+                select(func.count()).select_from(profile_experiences)
+                .where(profile_experiences.c.profile_id == target)
+            ),
+            "isOnly": count(
+                select(func.count()).select_from(profiles)
+                .where(profiles.c.user_id == select(profiles.c.user_id)
+                       .where(profiles.c.id == target).scalar_subquery())
+            ) == 1,
+        }
+        # Files already written to the output folder stay there; deleting a
+        # document someone may have sent is not this button's job.
+        impact["filesLeftOnDisk"] = count(
+            select(func.count()).select_from(generated_documents).where(
+                generated_documents.c.profile_id == target,
+                generated_documents.c.storage_key.isnot(None),
+            )
+        )
+    return impact
+
+
+def delete_profile(profile_id: str) -> dict[str, Any]:
+    """Delete a profile and everything that belongs to it.
+
+    Returns what was removed, so the UI can report it rather than just going
+    quiet. Refuses the last profile: a job has to belong to one, so deleting it
+    would leave the app unable to import anything.
+    """
+    impact = deletion_impact(profile_id)
+    if impact["isOnly"]:
+        raise LastProfile(
+            f"{impact['name']!r} is your only profile. Create another before "
+            "deleting this one — jobs belong to a profile."
+        )
+
+    target = _as_uuid(profile_id)
+    with get_db() as conn:
+        row = conn.execute(
+            delete(profiles)
+            .where(profiles.c.id == target)
+            .returning(profiles.c.user_id, profiles.c.is_default)
+        ).first()
+        if row is None:
+            raise ProfileNotFound(profile_id)
+
+        # Exactly one profile per user is the default, and the partial unique
+        # index only stops there being two — it cannot stop there being none.
+        if row.is_default:
+            successor = conn.execute(
+                select(profiles.c.id)
+                .where(profiles.c.user_id == row.user_id)
+                .order_by(profiles.c.created_at)
+                .limit(1)
+            ).scalar()
+            if successor:
+                conn.execute(
+                    profiles.update()
+                    .where(profiles.c.id == successor)
+                    .values(is_default=True)
+                )
+                impact["promoted"] = str(successor)
+
+    # A setting pointing at a deleted profile would fail later with an error
+    # that says nothing about where the stale id came from.
+    from app.services import settings_service
+
+    if (settings_service.get_settings().get("resumeProfile") or "") == profile_id:
+        settings_service.update_settings({"resumeProfile": ""})
+        impact["clearedResumeProfile"] = True
+
+    return impact
 
 
 # -- template settings ------------------------------------------------------

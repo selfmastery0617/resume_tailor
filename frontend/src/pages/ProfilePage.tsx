@@ -7,9 +7,13 @@
 import { useEffect, useState } from "react";
 import {
   createProfile,
+  deleteProfile,
+  fetchProfileDeletionImpact,
   fetchProfiles,
   updateProfile,
+  type ProfileDeletionImpact,
 } from "../api/templates";
+import { DeleteProfileDialog } from "../components/DeleteProfileDialog";
 import type {
   Education,
   Experience,
@@ -72,6 +76,9 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ProfileDeletionImpact | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!active) return;
@@ -204,6 +211,58 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
   const removeSkill = (id: string) =>
     setDraft((prev) => ({ ...prev, skills: prev.skills.filter((s) => s.id !== id) }));
 
+  const describeError = (err: unknown, fallback: string) =>
+    (err as { response?: { data?: { detail?: { message?: string } } } }).response?.data?.detail
+      ?.message ?? fallback;
+
+  /** Ask the backend what would be lost before showing the confirmation.
+   *  A profile owns its jobs, so this is rarely just "remove a name". */
+  const handleAskDelete = async () => {
+    if (!activeId) return;
+    setDeleteError(null);
+    setNotice(null);
+    try {
+      setPendingDelete(await fetchProfileDeletionImpact(activeId));
+    } catch (err) {
+      setError(describeError(err, "Could not check what deleting this profile would remove."));
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const result = await deleteProfile(pendingDelete.profileId);
+      const remaining = profiles.filter((p) => p.id !== result.profileId);
+      setProfiles(remaining);
+      setPendingDelete(null);
+      // Move to whichever profile the backend promoted, else the first left.
+      const next = remaining.find((p) => p.id === result.promoted) ?? remaining[0] ?? null;
+      if (next) {
+        selectProfile(next.id);
+      } else {
+        setActiveId(null);
+        setDraft(EMPTY_DATA);
+        setSaved(EMPTY_DATA);
+      }
+      const alsoRemoved = [
+        result.jobs && `${result.jobs} job${result.jobs === 1 ? "" : "s"}`,
+        result.bullets && `${result.bullets} bullets`,
+        result.documents && `${result.documents} resume record${result.documents === 1 ? "" : "s"}`,
+      ].filter(Boolean);
+      setNotice(
+        `Deleted “${result.name}”` +
+          (alsoRemoved.length ? `, along with ${alsoRemoved.join(", ")}.` : ".") +
+          (result.promoted && next ? ` “${next.name}” is now the default.` : ""),
+      );
+    } catch (err) {
+      setDeleteError(describeError(err, "Could not delete the profile."));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <div className="profile-page">
       <div className="templates-toolbar">
@@ -224,6 +283,15 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
         <button type="button" onClick={handleCreate}>
           New profile
         </button>
+        <button
+          type="button"
+          className="danger-quiet"
+          onClick={handleAskDelete}
+          disabled={!activeId || deleting}
+          title="Delete this profile and everything belonging to it"
+        >
+          Delete profile
+        </button>
         <div className="templates-actions">
           {dirty && <span className="unsaved-badge">Unsaved changes</span>}
           <button type="button" onClick={() => setDraft(saved)} disabled={!dirty || saving}>
@@ -234,6 +302,17 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
           </button>
         </div>
       </div>
+
+      <DeleteProfileDialog
+        impact={pendingDelete}
+        busy={deleting}
+        error={deleteError}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => {
+          setPendingDelete(null);
+          setDeleteError(null);
+        }}
+      />
 
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}

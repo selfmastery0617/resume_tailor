@@ -40,12 +40,35 @@ def update_profile(profile_id: str, payload: ProfileUpdate):
         raise _not_found("The requested profile does not exist.") from exc
 
 
-@router.delete("/{profile_id}", status_code=204)
-def delete_profile(profile_id: str):
+@router.get("/{profile_id}/deletion-impact")
+def deletion_impact(profile_id: str):
+    """What deleting this profile would destroy, so the UI can say so first.
+
+    A profile owns its jobs, and everything derived from a job hangs off that,
+    so this is rarely just "remove a name".
+    """
     try:
-        profile_service.delete_profile(profile_id)
+        return profile_service.deletion_impact(profile_id)
     except ProfileNotFound as exc:
         raise _not_found("The requested profile does not exist.") from exc
+
+
+@router.delete("/{profile_id}")
+def delete_profile(profile_id: str):
+    """Delete a profile and everything belonging to it.
+
+    Returns what was removed rather than 204, because the caller needs to
+    report it — and needs to know if the default moved.
+    """
+    try:
+        return profile_service.delete_profile(profile_id)
+    except ProfileNotFound as exc:
+        raise _not_found("The requested profile does not exist.") from exc
+    except profile_service.LastProfile as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LAST_PROFILE", "message": str(exc)},
+        ) from exc
 
 
 # -- template settings ----------------------------------------------------

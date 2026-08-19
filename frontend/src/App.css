@@ -1225,6 +1225,55 @@ a.experience-badge:hover { text-decoration: underline; }
 
 .resume-regenerate:hover { color: var(--text-h); }
 
+/* ---- deleting a profile ---- */
+.danger-quiet {
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.danger-quiet:hover:not(:disabled) {
+  color: var(--danger, #e5484d);
+  border-color: var(--danger, #e5484d);
+}
+
+button.danger {
+  background: var(--danger, #e5484d);
+  border-color: var(--danger, #e5484d);
+  color: #fff;
+  cursor: pointer;
+}
+
+button.danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.delete-profile-modal { max-width: 480px; }
+
+.delete-impact {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.85rem;
+  border-left: 2px solid var(--danger, #e5484d);
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  border-radius: 0 6px 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.delete-impact strong { font-variant-numeric: tabular-nums; }
+
+.delete-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  margin-top: 1rem;
+}
+
+.delete-confirm input { width: 100%; }
+
 /* ---- applied / delete actions ---- */
 .job-actions {
   display: flex;
