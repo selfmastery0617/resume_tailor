@@ -1,8 +1,12 @@
-"""Application settings, persisted in SQLite.
+"""Application settings.
 
-The existing skill-extraction prompt lived only in React state and reset on
-every reload; storing settings here fixes that and gives Phase 5 somewhere to
-read the tailoring prompt and output folder from.
+Three scopes exist in the schema; two are used today. Most settings belong to
+the account, but anything tied to one resume identity is stored against the
+profile — `firstCompany` names a company from that profile's own corpus, so a
+single account-wide value would be validated against the wrong history.
+
+Prompts live in their own table keyed by kind. The API still presents them as
+ordinary settings keys, so nothing above this module has to care.
 """
 
 import tempfile
@@ -88,7 +92,8 @@ DEFAULTS: dict[str, Any] = {
     # Which signed-in provider Phase 5 uses to generate content.
     "generationModel": "deepseek",
     # Company used as Job 1 (the earlier role) in experience extraction.
-    # Validated against database.json at save time.
+    # Scoped to a profile, not the user: each profile has its own corpus, so a
+    # company valid for one is meaningless for another.
     "firstCompany": "",
     # Profile whose details and template are used for tailored resume PDFs, and
     # whose name becomes "<Profile>_resume.pdf". Empty = use the first profile.
@@ -102,14 +107,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-# Prompts live in their own table, keyed by kind, because they are scoped and
-# versioned differently from a plain preference. The API still presents them as
-# ordinary settings keys, so nothing above this module has to care.
+# Settings that belong to one resume identity rather than the whole account.
+PROFILE_SCOPED: frozenset[str] = frozenset({"firstCompany"})
+
 PROMPT_KEYS: dict[str, str] = {
     "skillsPrompt": "skills",
     "tailoringPrompt": "tailoring",
     "summaryPrompt": "summary",
 }
+
+
+def _active_profile():
+    """The profile whose settings apply. None before any profile exists."""
+    from app.services import job_store
+
+    try:
+        return job_store.active_profile_id()
+    except Exception:  # noqa: BLE001 - no profile yet is a normal first-run state
+        return None
 
 
 def get_settings() -> dict[str, Any]:
@@ -119,6 +134,8 @@ def get_settings() -> dict[str, Any]:
     user_id = current_user_id()
     stored: dict[str, Any] = {}
 
+    profile_id = _active_profile()
+
     with get_db() as conn:
         for row in conn.execute(
             select(settings.c.key, settings.c.value).where(
@@ -126,6 +143,15 @@ def get_settings() -> dict[str, Any]:
             )
         ):
             stored[row.key] = row.value
+
+        # Profile-scoped values win, and are the only source for their keys.
+        if profile_id is not None:
+            for row in conn.execute(
+                select(settings.c.key, settings.c.value).where(
+                    settings.c.scope == "profile", settings.c.profile_id == profile_id
+                )
+            ):
+                stored[row.key] = row.value
 
         by_kind = {v: k for k, v in PROMPT_KEYS.items()}
         for row in conn.execute(
@@ -163,17 +189,19 @@ def validate_settings(patch: dict[str, Any]) -> dict[str, Any]:
                 value = str(path)
         elif key == "firstCompany":
             if value:
-                # Reject a company that isn't in database.json now, rather than
-                # letting extraction fail later with a confusing error.
-                from app.services import experience_db_store
+                # Reject a company that isn't in this profile's corpus now,
+                # rather than letting extraction fail later with a confusing
+                # error. Validated against the active profile, because that is
+                # the corpus the extraction will actually read.
+                from app.services import experience_db_store, job_store
 
                 try:
-                    db = experience_db_store.load_database()
-                except Exception:  # noqa: BLE001 - a broken file is its own error
+                    db = experience_db_store.load_database(job_store.active_profile_id())
+                except Exception:  # noqa: BLE001 - no corpus yet, or a broken one
                     db = None
                 if db is not None and db.find_company(str(value)) is None:
                     raise ValueError(
-                        f"{value!r} is not a company in database.json."
+                        f"{value!r} is not a company in this profile's database.json."
                     )
                 value = str(value).strip()
         elif key == "resumeProfile":
@@ -198,6 +226,7 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
     from app.ids import uuid7
 
     user_id = current_user_id()
+    profile_id = _active_profile()
 
     with get_db() as conn:
         for key, value in cleaned.items():
@@ -217,6 +246,25 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
                         index_elements=[prompts.c.user_id, prompts.c.kind],
                         index_where=prompts.c.scope == "user",
                         set_={"body": statement.excluded.body, "updated_at": func.now()},
+                    )
+                )
+            elif key in PROFILE_SCOPED:
+                if profile_id is None:
+                    raise ValueError(
+                        f"{key} belongs to a profile, and none exists yet."
+                    )
+                statement = pg_insert(settings).values(
+                    id=uuid7(),
+                    scope="profile",
+                    profile_id=profile_id,
+                    key=key,
+                    value=value,
+                )
+                conn.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[settings.c.profile_id, settings.c.key],
+                        index_where=settings.c.scope == "profile",
+                        set_={"value": statement.excluded.value, "updated_at": func.now()},
                     )
                 )
             else:

@@ -25,25 +25,43 @@ export interface ExperienceResult {
   extractedAt: string;
 }
 
+/** One profile's career corpus. Each profile has its own database.json. */
 export interface DatabaseInfo {
   text: string;
   companies: string[];
   path: string;
+  profileId: string;
+  /** False when this profile has no corpus yet — a normal state, not an error. */
+  exists: boolean;
   valid: boolean;
   detail: string | null;
 }
 
-export async function fetchExperienceDatabase(): Promise<DatabaseInfo> {
-  const response = await axios.get<DatabaseInfo>(`${BACKEND_URL}/api/experience/database`);
+export async function fetchExperienceDatabase(profileId?: string): Promise<DatabaseInfo> {
+  const response = await axios.get<DatabaseInfo>(`${BACKEND_URL}/api/experience/database`, {
+    params: profileId ? { profileId } : undefined,
+  });
   return response.data;
 }
 
-export async function saveExperienceDatabase(text: string): Promise<{ companies: string[] }> {
-  const response = await axios.put<{ companies: string[] }>(
+export async function saveExperienceDatabase(
+  text: string,
+  profileId?: string,
+): Promise<{ companies: string[]; profileId: string }> {
+  const response = await axios.put<{ companies: string[]; profileId: string }>(
     `${BACKEND_URL}/api/experience/database`,
     { text },
+    { params: profileId ? { profileId } : undefined },
   );
   return response.data;
+}
+
+/** The expected shape, for a profile starting from nothing. */
+export async function fetchDatabaseExample(): Promise<string> {
+  const response = await axios.get<{ text: string }>(
+    `${BACKEND_URL}/api/experience/database/example`,
+  );
+  return response.data.text;
 }
 
 export async function extractExperience(payload: {

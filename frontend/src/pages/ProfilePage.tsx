@@ -14,6 +14,7 @@ import {
   type ProfileDeletionImpact,
 } from "../api/templates";
 import { DeleteProfileDialog } from "../components/DeleteProfileDialog";
+import { ProfileCorpusEditor } from "../components/ProfileCorpusEditor";
 import type {
   Education,
   Experience,
@@ -512,6 +513,10 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
               </div>
             ))}
           </section>
+          <ProfileCorpusEditor
+            profileId={activeId}
+            profileName={profiles.find((p) => p.id === activeId)?.name ?? ""}
+          />
         </>
       )}
     </div>

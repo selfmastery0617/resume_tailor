@@ -434,6 +434,13 @@ def delete_profile(profile_id: str) -> dict[str, Any]:
                 )
                 impact["promoted"] = str(successor)
 
+    # The corpus is a file, so no foreign key removes it. Doing it here is what
+    # stops a career history outliving the profile someone deleted.
+    from app.services import experience_db_store
+
+    if experience_db_store.delete_for_profile(profile_id):
+        impact["deletedCorpus"] = True
+
     # A setting pointing at a deleted profile would fail later with an error
     # that says nothing about where the stale id came from.
     from app.services import settings_service

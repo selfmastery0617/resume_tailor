@@ -29,40 +29,84 @@ def _bad_request(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=400, detail={"code": code, "message": message})
 
 
-@router.get("/database")
-def get_database():
-    """Raw text for the editor plus the parsed company list for the dropdown."""
+def _resolve_profile(profile_id: str | None) -> str:
+    """Which profile's corpus to act on. Defaults to the active one."""
+    from app.services import job_store
+
+    if profile_id:
+        return profile_id
     try:
-        text = experience_db_store.load_raw()
-        db = experience_db_store.load_database()
+        return str(job_store.active_profile_id())
+    except job_store.NoProfile as exc:
+        raise _bad_request("NO_PROFILE", str(exc)) from exc
+
+
+@router.get("/database")
+def get_database(profileId: str | None = None):
+    """One profile's corpus: raw text for the editor, plus its company list."""
+    target = _resolve_profile(profileId)
+    text = experience_db_store.load_raw(target)
+
+    if not text:
+        # No corpus yet is a normal state for a new profile, not an error.
         return {
-            "text": text,
-            "companies": db.company_names(),
-            "path": str(experience_db_store.path()),
+            "text": "",
+            "companies": [],
+            "path": str(experience_db_store.path(target)),
+            "profileId": target,
+            "exists": False,
             "valid": True,
             "detail": None,
         }
+
+    try:
+        db = experience_db_store.load_database(target)
     except ExperienceDatabaseError as exc:
         # Still return the text so the user can fix it in the editor.
         return {
-            "text": experience_db_store.path().read_text(encoding="utf-8-sig")
-            if experience_db_store.path().exists()
-            else "",
+            "text": text,
             "companies": [],
-            "path": str(experience_db_store.path()),
+            "path": str(experience_db_store.path(target)),
+            "profileId": target,
+            "exists": True,
             "valid": False,
             "detail": str(exc),
         }
 
+    return {
+        "text": text,
+        "companies": db.company_names(),
+        "path": str(experience_db_store.path(target)),
+        "profileId": target,
+        "exists": True,
+        "valid": True,
+        "detail": None,
+    }
+
 
 @router.put("/database")
-def save_database(payload: SaveDatabaseRequest):
+def save_database(payload: SaveDatabaseRequest, profileId: str | None = None):
+    target = _resolve_profile(profileId)
     try:
-        db = experience_db_store.save_raw_text(payload.text)
+        db = experience_db_store.save_raw_text(target, payload.text)
     except ExperienceDatabaseError as exc:
         raise _bad_request("INVALID_DATABASE", str(exc)) from exc
     # Company list is returned so the dropdown updates without a second call.
-    return {"companies": db.company_names(), "valid": True, "detail": None}
+    return {
+        "companies": db.company_names(),
+        "profileId": target,
+        "exists": True,
+        "valid": True,
+        "detail": None,
+    }
+
+
+@router.get("/database/example")
+def database_example():
+    """The expected shape, for a profile starting from nothing."""
+    import json
+
+    return {"text": json.dumps(experience_db_store.SEED, indent=2, ensure_ascii=False)}
 
 
 @router.get("/progress")
@@ -123,8 +167,15 @@ async def extract(payload: ExtractRequest):
             "NO_FIRST_COMPANY", "Please select a First Company in Settings first."
         )
 
+    target = _resolve_profile(None)
     try:
-        db = experience_db_store.load_database()
+        db = experience_db_store.load_database(target)
+    except experience_db_store.CorpusNotFound as exc:
+        raise _bad_request(
+            "NO_CORPUS",
+            "This profile has no database.json yet. Add one on the Profile tab "
+            "before extracting.",
+        ) from exc
     except ExperienceDatabaseError as exc:
         raise _bad_request("INVALID_DATABASE", str(exc)) from exc
 

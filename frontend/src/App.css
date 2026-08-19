@@ -1225,6 +1225,25 @@ a.experience-badge:hover { text-decoration: underline; }
 
 .resume-regenerate:hover { color: var(--text-h); }
 
+/* ---- per-profile corpus editor ---- */
+.corpus-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.corpus-path {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 30ch;
+  margin-right: auto;
+}
+
 /* ---- deleting a profile ---- */
 .danger-quiet {
   color: var(--text-dim);

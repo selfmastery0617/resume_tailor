@@ -17,11 +17,6 @@ import {
   type FolderCheck,
   type GenerationModel,
 } from "../api/settings";
-import {
-  fetchExperienceDatabase,
-  saveExperienceDatabase,
-  type DatabaseInfo,
-} from "../api/experience";
 import { fetchProfiles } from "../api/templates";
 import type { Profile } from "../resume/types";
 import { DeepSeekLoginPanel } from "../components/DeepSeekLoginPanel";
@@ -62,11 +57,6 @@ export function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [folderCheck, setFolderCheck] = useState<FolderCheck | null>(null);
-  const [dbInfo, setDbInfo] = useState<DatabaseInfo | null>(null);
-  const [dbText, setDbText] = useState("");
-  const [dbError, setDbError] = useState<string | null>(null);
-  const [dbNotice, setDbNotice] = useState<string | null>(null);
-  const [dbSaving, setDbSaving] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [showDeepSeekLogin, setShowDeepSeekLogin] = useState(false);
   // Bumped after a successful sign-in to make the provider cards re-check.
@@ -86,46 +76,12 @@ export function SettingsPage() {
         setError("Could not load settings. Is the backend running on port 8000?");
       }
       try {
-        const info = await fetchExperienceDatabase();
-        setDbInfo(info);
-        setDbText(info.text);
-        if (!info.valid && info.detail) setDbError(info.detail);
-      } catch {
-        setDbError("Could not load database.json.");
-      }
-      try {
         setProfiles(await fetchProfiles());
       } catch {
         /* the dropdown falls back to "No profiles yet" */
       }
     })();
   }, []);
-
-  const handleSaveDatabase = async () => {
-    setDbSaving(true);
-    setDbError(null);
-    setDbNotice(null);
-    try {
-      const { companies } = await saveExperienceDatabase(dbText);
-      // Dropdown updates immediately from the save response.
-      setDbInfo((prev) => (prev ? { ...prev, companies, valid: true, text: dbText } : prev));
-      setDbNotice(`Saved. ${companies.length} companies available.`);
-      // A saved edit can remove the selected company; clear it rather than
-      // leaving a selection that would fail at extraction time.
-      if (draft && draft.firstCompany && !companies.includes(draft.firstCompany)) {
-        update("firstCompany", "");
-        setDbNotice(
-          `Saved. "${draft.firstCompany}" no longer exists, so First Company was cleared.`,
-        );
-      }
-    } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: { message?: string } } } })
-        .response?.data?.detail?.message;
-      setDbError(detail ?? "Could not save database.json.");
-    } finally {
-      setDbSaving(false);
-    }
-  };
 
   const dirty =
     settings !== null && draft !== null && JSON.stringify(settings) !== JSON.stringify(draft);
@@ -267,70 +223,6 @@ export function SettingsPage() {
             </select>
           </div>
         </div>
-      </section>
-
-      <section className="settings-section">
-        <h2>Experience database</h2>
-        <p className="notice">
-          Source of truth for experience extraction: Company → Product → Projects →
-          Challenges. Stored at <code>{dbInfo?.path ?? "backend/data/database.json"}</code>.
-        </p>
-
-        <div className="style-row" style={{ maxWidth: 520 }}>
-          <label htmlFor="first-company" className="style-label">
-            First Company (Job 1)
-          </label>
-          <div className="style-control">
-            <select
-              id="first-company"
-              value={draft.firstCompany}
-              onChange={(event) => update("firstCompany", event.target.value)}
-              disabled={!dbInfo?.companies.length}
-            >
-              <option value="">— none selected —</option>
-              {(dbInfo?.companies ?? []).map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        {!draft.firstCompany && (
-          <p className="notice exp-warn">
-            No first company selected — experience extraction will refuse to run.
-          </p>
-        )}
-        {/* A stored company can go stale when database.json is edited outside
-            the app; surface it here instead of failing at extraction time. */}
-        {draft.firstCompany &&
-          dbInfo?.companies.length &&
-          !dbInfo.companies.includes(draft.firstCompany) && (
-            <p className="error">
-              “{draft.firstCompany}” is no longer in database.json. Pick another
-              company — extraction will fail until you do.
-            </p>
-          )}
-
-        <div className="prompt-section">
-          <label htmlFor="database-json">database.json</label>
-          <textarea
-            id="database-json"
-            className="prompt-textarea db-editor"
-            rows={16}
-            spellCheck={false}
-            value={dbText}
-            onChange={(event) => {
-              setDbText(event.target.value);
-              setDbNotice(null);
-            }}
-          />
-        </div>
-        {dbError && <p className="error">{dbError}</p>}
-        {dbNotice && <p className="notice">{dbNotice}</p>}
-        <button type="button" onClick={handleSaveDatabase} disabled={dbSaving}>
-          {dbSaving ? "Saving…" : "Save database.json"}
-        </button>
       </section>
 
       <section className="settings-section">
