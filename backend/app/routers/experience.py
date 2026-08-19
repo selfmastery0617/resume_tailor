@@ -101,6 +101,38 @@ def save_database(payload: SaveDatabaseRequest, profileId: str | None = None):
     }
 
 
+class GenerateDatabaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Anything the profile's experience section does not say but should be
+    # reflected — a product name, a team size, a metric.
+    notes: str = ""
+
+
+@router.post("/database/generate")
+async def generate_database(
+    payload: GenerateDatabaseRequest, profileId: str | None = None
+):
+    """Draft a corpus from the profile's own experience.
+
+    Returns the draft for review rather than saving it: the model is phrasing
+    someone's career, and a wrong metric written straight to disk becomes a
+    wrong metric on a resume.
+    """
+    from app.services import corpus_generator, profile_service
+
+    target = _resolve_profile(profileId)
+    try:
+        profile = profile_service.get_profile(target)
+    except profile_service.ProfileNotFound as exc:
+        raise _bad_request("NO_PROFILE", "That profile no longer exists.") from exc
+
+    try:
+        return await corpus_generator.generate_corpus(profile, payload.notes)
+    except corpus_generator.CorpusGenerationError as exc:
+        raise _bad_request("GENERATION_FAILED", str(exc)) from exc
+
+
 @router.get("/database/example")
 def database_example():
     """The expected shape, for a profile starting from nothing."""

@@ -105,6 +105,47 @@ TITLE_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
+# Turns a profile's experience into the career corpus the pipeline ranks
+# against. Run on demand from the Profile tab, not as part of extraction.
+#
+# The schema is supplied as a placeholder rather than written into the prompt,
+# so editing the wording cannot drift from the shape the parser accepts.
+DEFAULT_CORPUS_PROMPT = """Convert the experience below into a career database, as JSON.
+
+Rules:
+- Output only the JSON array. No markdown fence, no commentary before or after.
+- Use only what the experience states. Do not invent employers, products, dates,
+  metrics, or technologies. If something is not stated, leave it out.
+- Give every challenge a unique id: lowercase, company_product_project_challengeN.
+- challenge, action, achievement and business_impact are one sentence each.
+- seniority_indicator describes scope: who was led, who it was presented to.
+- skills_used must list the technologies and disciplines each challenge names.
+  Never leave it empty when any are mentioned.
+- Split each role into two projects where the experience describes two distinct
+  pieces of work, and give each project two challenges where there is enough
+  detail for two. Where there is not, write fewer — one real challenge beats two
+  with an invented half. Selection prefers products with two projects, so split
+  wherever the material genuinely supports it.
+
+Schema:
+{schema}
+
+Candidate: {full_name}, {professional_title}
+
+Experience:
+{experience}
+
+Additional notes:
+{notes}"""
+
+CORPUS_PLACEHOLDERS: tuple[str, ...] = (
+    "schema",
+    "full_name",
+    "professional_title",
+    "experience",
+    "notes",
+)
+
 SUMMARY_PLACEHOLDERS: tuple[str, ...] = (
     "sentences",
     "job_title",
@@ -120,6 +161,8 @@ DEFAULTS: dict[str, Any] = {
     "summaryPrompt": DEFAULT_SUMMARY_PROMPT,
     # Step 5: the headline title, written once the summary exists.
     "titlePrompt": DEFAULT_TITLE_PROMPT,
+    # Not part of extraction: builds a profile's database.json on demand.
+    "corpusPrompt": DEFAULT_CORPUS_PROMPT,
     "outputFolder": "",
     # Which signed-in provider Phase 5 uses to generate content.
     "generationModel": "deepseek",
@@ -147,6 +190,7 @@ PROMPT_KEYS: dict[str, str] = {
     "tailoringPrompt": "tailoring",
     "summaryPrompt": "summary",
     "titlePrompt": "title",
+    "corpusPrompt": "corpus",
 }
 
 

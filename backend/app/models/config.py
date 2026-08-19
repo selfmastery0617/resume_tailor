@@ -26,7 +26,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from .base import metadata, pk_column, timestamps
 
 SETTING_SCOPES = ("org", "user", "profile")
-PROMPT_KINDS = ("skills", "tailoring", "summary", "title")
+PROMPT_KINDS = ("skills", "tailoring", "summary", "title", "corpus")
 PROVIDERS = ("deepseek", "chatgpt", "jobright")
 PROVIDER_STATUSES = ("disconnected", "connected", "expired", "error")
 QUEUE_STATES = ("queued", "running", "succeeded", "failed", "cancelled")
@@ -75,7 +75,8 @@ prompts = Table(
     *timestamps(),
     CheckConstraint("scope IN ('org', 'user', 'profile')", name="scope_known"),
     CheckConstraint(
-        "kind IN ('skills', 'tailoring', 'summary', 'title')", name="kind_known"
+        "kind IN ('skills', 'tailoring', 'summary', 'title', 'corpus')",
+        name="kind_known",
     ),
     CheckConstraint(
         "(scope = 'org'     AND org_id IS NOT NULL AND user_id IS NULL     AND profile_id IS NULL) OR"

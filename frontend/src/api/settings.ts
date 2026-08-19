@@ -11,6 +11,9 @@ export interface AppSettings {
   summaryPrompt: string;
   /** Writes the resume headline, once the summary exists. */
   titlePrompt: string;
+  /** Drafts a profile's database.json from its experience. Not part of
+   *  extraction — run on demand from the Profile tab. */
+  corpusPrompt: string;
   outputFolder: string;
   generationModel: GenerationModel;
   /** Company used as Job 1 (the earlier role) in experience extraction. */

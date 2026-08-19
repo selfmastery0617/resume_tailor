@@ -49,6 +49,15 @@ const TITLE_PLACEHOLDERS = [
   "bullets",
 ] as const;
 
+/** Mirrors CORPUS_PLACEHOLDERS in backend settings_service.py. */
+const CORPUS_PLACEHOLDERS = [
+  "schema",
+  "full_name",
+  "professional_title",
+  "experience",
+  "notes",
+] as const;
+
 function PlaceholderList({ tokens }: { tokens: readonly string[] }) {
   return (
     <>
@@ -105,6 +114,9 @@ export function SettingsPage() {
   );
   const missingTitlePlaceholders = TITLE_PLACEHOLDERS.filter(
     (token) => !(draft?.titlePrompt ?? "").includes(`{${token}}`),
+  );
+  const missingCorpusPlaceholders = CORPUS_PLACEHOLDERS.filter(
+    (token) => !(draft?.corpusPrompt ?? "").includes(`{${token}}`),
   );
 
   // Mirrors build_tailored_pdf_filename() so the file name is visible before
@@ -301,9 +313,10 @@ export function SettingsPage() {
       <section className="settings-section">
         <h2>Prompts</h2>
         <p className="notice">
-          All five prompts for one job run as turns in a{" "}
-          <strong>single DeepSeek chat</strong>, so each one still has the
-          earlier answers in context.
+          The first four run as turns in a{" "}
+          <strong>single DeepSeek chat</strong> for one job, so each still has
+          the earlier answers in context. The last is separate — it builds a
+          profile's career database rather than tailoring a resume.
         </p>
         <div className="prompt-section">
           <label htmlFor="settings-skills-prompt">1. Skill extraction prompt</label>
@@ -383,6 +396,33 @@ export function SettingsPage() {
           {missingTitlePlaceholders.length > 0 && (
             <p className="notice exp-warn">
               Missing {missingTitlePlaceholders.map((t) => `{${t}}`).join(", ")}{" "}
+              — the model won't receive that context.
+            </p>
+          )}
+        </div>
+
+        <div className="prompt-section">
+          <label htmlFor="settings-corpus-prompt">
+            Database generation prompt
+          </label>
+          <p className="notice">
+            Not part of extraction. Drafts a profile's{" "}
+            <code>database.json</code> from its experience section, on demand
+            from the <strong>Profile</strong> tab. <code>{"{schema}"}</code> is
+            filled with the shape the parser accepts, so editing the wording
+            cannot drift from it. Placeholders:{" "}
+            <PlaceholderList tokens={CORPUS_PLACEHOLDERS} />.
+          </p>
+          <textarea
+            id="settings-corpus-prompt"
+            className="prompt-textarea"
+            rows={14}
+            value={draft.corpusPrompt}
+            onChange={(event) => update("corpusPrompt", event.target.value)}
+          />
+          {missingCorpusPlaceholders.length > 0 && (
+            <p className="notice exp-warn">
+              Missing {missingCorpusPlaceholders.map((t) => `{${t}}`).join(", ")}{" "}
               — the model won't receive that context.
             </p>
           )}
