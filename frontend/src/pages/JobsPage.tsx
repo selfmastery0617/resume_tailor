@@ -40,7 +40,7 @@ import { UrlCellRenderer } from "../components/UrlCellRenderer";
 import { ResumeCellRenderer, type ResumeGridContext } from "../components/ResumeCellRenderer";
 import { DescriptionActionCell } from "../components/jobs/DescriptionActionCell";
 import { RowDeleteCell, type RowDeleteContext } from "../components/jobs/RowDeleteCell";
-import { StatusCellEditor, StatusCellRenderer } from "../components/jobs/StatusCell";
+import { StatusCellRenderer, type StatusContext } from "../components/jobs/StatusCell";
 import { useCellRange } from "../components/jobs/useCellRange";
 import { useResolvedTheme } from "../components/ThemeToggle";
 
@@ -96,22 +96,6 @@ const EDITABLE = new Set(["date_added", "title", "company", "url", "location", "
 /** Cleared by Delete. Status is excluded: it can never go back to empty. */
 const CLEARABLE = ["date_added", "title", "company", "url", "location"];
 
-/** The always-present row at the bottom. Typing in it creates a job. */
-const BLANK_ROW_ID = "__blank__";
-
-function blankRow(): Job {
-  return {
-    id: BLANK_ROW_ID,
-    title: "",
-    company: "",
-    location: "",
-    url: "",
-    description: "",
-    date_added: "",
-    status: "",
-    hasResume: false,
-  } as Job;
-}
 
 export function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -130,7 +114,10 @@ export function JobsPage() {
   const gridApiRef = useRef<GridApi<Job> | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
-  const rows = useMemo(() => [...jobs, blankRow()], [jobs]);
+  // The table shows exactly what is stored. There is no placeholder row: an
+  // empty row that renders pipeline controls reads as broken data, and "Add
+  // row" says what it does. Paste past the last row still creates rows.
+  const rows = jobs;
 
   const range = useCellRange(wrapperRef, {
     columnIds: COLUMN_IDS,
@@ -183,12 +170,6 @@ export function JobsPage() {
     async (job: Job, field: string, value: string) => {
       setError(null);
       try {
-        if (job.id === BLANK_ROW_ID) {
-          // Typing in the bottom row is how a job gets created.
-          const created = await createJob({ [field]: value });
-          setJobs((prev) => [...prev, created]);
-          return created;
-        }
         const updated = await updateJob(job.id, { [field]: value });
         setJobs((prev) => prev.map((j) => (j.id === job.id ? updated : j)));
         return updated;
@@ -217,7 +198,7 @@ export function JobsPage() {
   const cellText = useCallback((job: Job, colId: string): string => {
     switch (colId) {
       case "id":
-        return job.id === BLANK_ROW_ID ? "" : job.id;
+        return job.id;
       case "description":
         return job.description ? "yes" : "";
       case "resume":
@@ -288,7 +269,7 @@ export function JobsPage() {
 
         const existing = rows[rowIndex];
         try {
-          if (!existing || existing.id === BLANK_ROW_ID) {
+          if (!existing) {
             await createJob(patch);
             created += 1;
           } else {
@@ -321,7 +302,7 @@ export function JobsPage() {
     let touched = 0;
     for (let r = range.range.top; r <= range.range.bottom; r += 1) {
       const job = rows[r];
-      if (!job || job.id === BLANK_ROW_ID) continue;
+      if (!job) continue;
       const patch = Object.fromEntries(clearable.map((c) => [c, ""]));
       try {
         await updateJob(job.id, patch);
@@ -340,7 +321,7 @@ export function JobsPage() {
     const ids: string[] = [];
     for (let r = range.range.top; r <= range.range.bottom; r += 1) {
       const job = rows[r];
-      if (job && job.id !== BLANK_ROW_ID) ids.push(job.id);
+      if (job) ids.push(job.id);
     }
     if (!ids.length) return;
     if (!window.confirm(`Delete ${ids.length} row${ids.length === 1 ? "" : "s"}? This cannot be undone.`)) {
@@ -471,6 +452,32 @@ This also removes its extracted experience and resume record. Any PDF already sa
     [experienceResults, reload],
   );
 
+  const addRow = useCallback(async () => {
+    setError(null);
+    try {
+      const created = await createJob({});
+      setJobs((prev) => [...prev, created]);
+      setNotice("Row added — it is dated today until you change it.");
+    } catch (err) {
+      setError(describeError(err, "Could not add a row."));
+    }
+  }, []);
+
+  const changeStatus = useCallback(
+    async (job: Job, status: string) => {
+      if (!status) return;
+      setError(null);
+      try {
+        const updated = await updateJob(job.id, { status });
+        setJobs((prev) => prev.map((j) => (j.id === job.id ? updated : j)));
+      } catch (err) {
+        setError(describeError(err, "Could not change the status."));
+        void reload();
+      }
+    },
+    [reload],
+  );
+
   const handleImport = async () => {
     setImporting(true);
     setError(null);
@@ -498,7 +505,7 @@ This also removes its extracted experience and resume record. Any PDF already sa
         width: 96,
         editable: false,
         valueGetter: (p: ValueGetterParams<Job>) =>
-          p.data?.id === BLANK_ROW_ID ? "" : p.data?.id?.slice(0, 8),
+          p.data?.id?.slice(0, 8) ?? "",
         ...selectable("id"),
       },
       {
@@ -570,10 +577,9 @@ This also removes its extracted experience and resume record. Any PDF already sa
         headerName: "Status",
         width: 130,
         sortable: false,
-        // Locked until a resume exists — there is nothing to be ready with yet.
-        editable: (params) => Boolean(params.data?.hasResume),
+        // The renderer is the control, so the cell is never "edited" by AG Grid.
+        editable: false,
         cellRenderer: StatusCellRenderer,
-        cellEditor: StatusCellEditor,
         ...selectable("status"),
       },
       {
@@ -593,7 +599,8 @@ This also removes its extracted experience and resume record. Any PDF already sa
   }, [range]);
 
   const gridContext: ResumeGridContext &
-    RowDeleteContext & {
+    RowDeleteContext &
+    StatusContext & {
       onViewDescription: (job: Job) => void;
       onGenerateDescription: (job: Job) => void;
     } = {
@@ -605,7 +612,7 @@ This also removes its extracted experience and resume record. Any PDF already sa
     onViewDescription: setDescriptionModalJob,
     deletingRows,
     onDeleteRow: deleteRow,
-    blankRowId: BLANK_ROW_ID,
+    onChangeStatus: changeStatus,
     onGenerateDescription: () =>
       setNotice("Generate Description isn't wired up yet — its behaviour is still to be decided."),
   };
@@ -616,6 +623,9 @@ This also removes its extracted experience and resume record. Any PDF already sa
         <button className="import-button" onClick={handleImport} disabled={importing}>
           {importing && <span className="spinner" aria-hidden="true" />}
           {importing ? "Importing…" : "Import Jobs"}
+        </button>
+        <button type="button" onClick={() => void addRow()}>
+          + Add row
         </button>
         <span className="jobs-hint">
           Drag to select · Ctrl+C / Ctrl+V · Delete clears cells · 🗑 or Ctrl+Delete removes rows
@@ -663,9 +673,6 @@ This also removes its extracted experience and resume record. Any PDF already sa
           theme={useResolvedTheme() === "dark" ? gridThemeDark : gridThemeLight}
           context={gridContext}
           getRowId={(params) => params.data.id}
-          getRowClass={(params) =>
-            params.data?.id === BLANK_ROW_ID ? "job-row--blank" : undefined
-          }
           onCellValueChanged={onCellValueChanged}
           onGridReady={(event) => {
             gridApiRef.current = event.api;

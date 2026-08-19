@@ -1274,10 +1274,35 @@ a.experience-badge:hover { text-decoration: underline; }
   box-shadow: inset 0 0 0 1px rgba(91, 147, 240, 0.45);
 }
 
-/* The always-present row for new data. Muted so it reads as a placeholder
-   rather than a job with no title. */
-.jobs-grid .ag-row.job-row--blank .ag-cell { opacity: 0.55; font-style: italic; }
-.jobs-grid .ag-row.job-row--blank .ag-cell.cell-selected { opacity: 1; }
+/* Status is a live control, not a click-to-edit cell, so it carries its own
+   colour rather than sitting behind a tag. */
+.status-select {
+  width: 100%;
+  padding: 0.1rem 0.3rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.status-select--ready {
+  background: rgba(91, 147, 240, 0.16);
+  border-color: rgba(91, 147, 240, 0.45);
+  color: #4b86e0;
+}
+
+.status-select--applied {
+  background: rgba(62, 207, 142, 0.16);
+  border-color: rgba(62, 207, 142, 0.45);
+  color: #2fa06d;
+}
+
+/* Visible but inert until a resume exists — the column reads the same either
+   way, instead of the control appearing out of nowhere. */
+.status-select:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .status-tag {
   display: inline-block;
