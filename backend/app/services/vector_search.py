@@ -25,7 +25,16 @@ _embedding_cache: dict[str, Any] = {}
 
 
 def _load_model() -> Any:
-    """Load the encoder once. Returns None when unavailable."""
+    """Load the encoder once. Returns None when unavailable.
+
+    Tries the local cache first. Plain `SentenceTransformer(MODEL_NAME)` calls
+    the Hugging Face Hub on every load to check for a newer revision — measured
+    at 13.2s against 0.1s from cache, on a model that has not changed since it
+    was published. It also means startup depends on the network, and prints an
+    unauthenticated-request warning that looks like something is wrong.
+
+    Falls back to a normal load, which downloads, when the cache has no copy.
+    """
     global _model, _model_failed
     if _model is not None or _model_failed is not None:
         return _model
@@ -35,7 +44,10 @@ def _load_model() -> Any:
         try:
             from sentence_transformers import SentenceTransformer
 
-            _model = SentenceTransformer(MODEL_NAME)
+            try:
+                _model = SentenceTransformer(MODEL_NAME, local_files_only=True)
+            except Exception:  # noqa: BLE001 - not cached yet; fetch it
+                _model = SentenceTransformer(MODEL_NAME)
         except Exception as exc:  # noqa: BLE001 - import, download, or runtime
             _model_failed = str(exc)
             _model = None
