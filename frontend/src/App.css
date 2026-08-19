@@ -1306,6 +1306,35 @@ a.experience-badge:hover { text-decoration: underline; }
 
 .description-disabled { color: var(--text-dim); }
 
+/* One per row, always present. Ctrl+Delete still works on a range, but a
+   keyboard-only way to remove a row is not something anyone discovers. */
+.row-delete-button {
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.row-delete-button:hover:not(:disabled) {
+  color: var(--danger, #e5484d);
+  border-color: var(--danger, #e5484d);
+}
+
+.row-delete-button:disabled { opacity: 0.5; cursor: default; }
+
+/* Never part of a selected rectangle — it holds an action, not data. */
+.jobs-grid .ag-cell.row-delete-cell {
+  background-color: transparent !important;
+  box-shadow: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
 /* ---- per-profile corpus editor ---- */
 .corpus-actions {
   display: flex;

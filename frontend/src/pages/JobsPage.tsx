@@ -39,6 +39,7 @@ import { InfoModal } from "../components/InfoModal";
 import { UrlCellRenderer } from "../components/UrlCellRenderer";
 import { ResumeCellRenderer, type ResumeGridContext } from "../components/ResumeCellRenderer";
 import { DescriptionActionCell } from "../components/jobs/DescriptionActionCell";
+import { RowDeleteCell, type RowDeleteContext } from "../components/jobs/RowDeleteCell";
 import { StatusCellEditor, StatusCellRenderer } from "../components/jobs/StatusCell";
 import { useCellRange } from "../components/jobs/useCellRange";
 import { useResolvedTheme } from "../components/ThemeToggle";
@@ -124,6 +125,7 @@ export function JobsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(20);
   const [deepSeekConnected, setDeepSeekConnected] = useState(true);
+  const [deletingRows, setDeletingRows] = useState<Set<string>>(new Set());
 
   const gridApiRef = useRef<GridApi<Job> | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -133,7 +135,9 @@ export function JobsPage() {
   const range = useCellRange(wrapperRef, {
     columnIds: COLUMN_IDS,
     // A drag that starts on a button is that button being pressed.
-    isInteractive: (target) => Boolean(target.closest("button, a, select, input")),
+    // A drag starting on a control is that control being used, not a selection.
+    isInteractive: (target) =>
+      Boolean(target.closest("button, a, select, input, .row-delete-cell")),
   });
 
   const describeError = (err: unknown, fallback: string) =>
@@ -352,6 +356,44 @@ export function JobsPage() {
     }
   }, [range, rows, reload]);
 
+  const deleteRow = useCallback(
+    async (job: Job) => {
+      const label = job.title || job.company || "this row";
+      if (!window.confirm(`Delete "${label}"?
+
+This also removes its extracted experience and resume record. Any PDF already saved to your output folder stays on disk.`)) {
+        return;
+      }
+      setDeletingRows((prev) => new Set(prev).add(job.id));
+      setError(null);
+      try {
+        await deleteJobRows([job.id]);
+        setExperienceResults((prev) => {
+          const next = { ...prev };
+          delete next[job.id];
+          return next;
+        });
+        setResumeResults((prev) => {
+          const next = { ...prev };
+          delete next[job.id];
+          return next;
+        });
+        range.clear();
+        await reload();
+        setNotice(`Deleted "${label}".`);
+      } catch (err) {
+        setError(describeError(err, "Could not delete that row."));
+      } finally {
+        setDeletingRows((prev) => {
+          const next = new Set(prev);
+          next.delete(job.id);
+          return next;
+        });
+      }
+    },
+    [range, reload],
+  );
+
   // Keyboard lives on the wrapper so it only fires while the table has focus.
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -534,19 +576,36 @@ export function JobsPage() {
         cellEditor: StatusCellEditor,
         ...selectable("status"),
       },
+      {
+        colId: "rowDelete",
+        headerName: "",
+        width: 56,
+        editable: false,
+        sortable: false,
+        filter: false,
+        resizable: false,
+        // Deliberately outside COLUMN_IDS: an action button is not data, so it
+        // takes no part in range selection, copy or clear.
+        cellRenderer: RowDeleteCell,
+        cellClass: "row-delete-cell",
+      },
     ];
   }, [range]);
 
-  const gridContext: ResumeGridContext & {
-    onViewDescription: (job: Job) => void;
-    onGenerateDescription: (job: Job) => void;
-  } = {
+  const gridContext: ResumeGridContext &
+    RowDeleteContext & {
+      onViewDescription: (job: Job) => void;
+      onGenerateDescription: (job: Job) => void;
+    } = {
     experienceExtracting,
     experienceResults,
     resumeGenerating,
     resumeResults,
     onGenerateResume: handleGenerateResume,
     onViewDescription: setDescriptionModalJob,
+    deletingRows,
+    onDeleteRow: deleteRow,
+    blankRowId: BLANK_ROW_ID,
     onGenerateDescription: () =>
       setNotice("Generate Description isn't wired up yet — its behaviour is still to be decided."),
   };
@@ -559,7 +618,7 @@ export function JobsPage() {
           {importing ? "Importing…" : "Import Jobs"}
         </button>
         <span className="jobs-hint">
-          Drag to select · Ctrl+C / Ctrl+V · Delete clears cells · Ctrl+Delete removes rows
+          Drag to select · Ctrl+C / Ctrl+V · Delete clears cells · 🗑 or Ctrl+Delete removes rows
         </span>
         <label className="page-size">
           Rows

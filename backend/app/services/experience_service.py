@@ -15,6 +15,7 @@ unavailable the challenges are rendered deterministically instead, so the
 feature degrades rather than failing.
 """
 
+import asyncio
 import json
 import re
 from contextlib import asynccontextmanager
@@ -826,8 +827,17 @@ async def extract_experience(
             query=query[:300],
         )
 
-        job1_sel, job1_picked = _select_job1(db, first_company, query)
-        job2_sel, job2_picked = _select_job2(db, first_company, query)
+        # Off the event loop. Ranking calls sentence-transformers, which is
+        # CPU-bound and loads a ~90MB model on first use — measured at 30s.
+        # Run inline it froze the whole server for that long: every request,
+        # including /health, waits behind it because nothing else can be
+        # served while the loop is executing Python.
+        job1_sel, job1_picked = await asyncio.to_thread(
+            _select_job1, db, first_company, query
+        )
+        job2_sel, job2_picked = await asyncio.to_thread(
+            _select_job2, db, first_company, query
+        )
 
         job1_sel.bullets, gen1 = await _generate_bullets(
             chat, job1_picked, job1_sel, job_description, JOB1_BULLET_COUNT
