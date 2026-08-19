@@ -75,6 +75,36 @@ Target job description:
 Experience just written for this resume ({companies}):
 {bullets}"""
 
+# Runs last, after the summary, in the same chat. The headline on a tailored
+# resume should match the role being applied for rather than stay generic.
+DEFAULT_TITLE_PROMPT = """Write the professional title for the top of a resume targeting this role.
+
+Rules:
+- Output only the title itself. No quotes, no explanation, no trailing punctuation.
+- Keep it under 60 characters.
+- Use a title a recruiter would actually search for, not an invented one.
+- Do not claim more seniority than the experience below supports.
+
+Target role: {job_title}
+Current title on the profile: {current_title}
+
+Target job description:
+{job_description}
+
+Summary just written:
+{summary}
+
+Experience just written for this resume:
+{bullets}"""
+
+TITLE_PLACEHOLDERS: tuple[str, ...] = (
+    "job_title",
+    "current_title",
+    "job_description",
+    "summary",
+    "bullets",
+)
+
 SUMMARY_PLACEHOLDERS: tuple[str, ...] = (
     "sentences",
     "job_title",
@@ -88,6 +118,8 @@ DEFAULTS: dict[str, Any] = {
     "tailoringPrompt": DEFAULT_TAILORING_PROMPT,
     # Step 4: a resume summary written from the bullets the pipeline just made.
     "summaryPrompt": DEFAULT_SUMMARY_PROMPT,
+    # Step 5: the headline title, written once the summary exists.
+    "titlePrompt": DEFAULT_TITLE_PROMPT,
     "outputFolder": "",
     # Which signed-in provider Phase 5 uses to generate content.
     "generationModel": "deepseek",
@@ -114,6 +146,7 @@ PROMPT_KEYS: dict[str, str] = {
     "skillsPrompt": "skills",
     "tailoringPrompt": "tailoring",
     "summaryPrompt": "summary",
+    "titlePrompt": "title",
 }
 
 

@@ -9,6 +9,8 @@ export interface AppSettings {
   tailoringPrompt: string;
   /** Writes the resume summary from the bullets, in the same DeepSeek chat. */
   summaryPrompt: string;
+  /** Writes the resume headline, once the summary exists. */
+  titlePrompt: string;
   outputFolder: string;
   generationModel: GenerationModel;
   /** Company used as Job 1 (the earlier role) in experience extraction. */

@@ -693,6 +693,90 @@ def _role_payload(label: str, selection: JobSelection) -> dict[str, Any]:
     }
 
 
+def _clean_title(reply: str) -> str:
+    """One line, no wrapper. Chat models like to explain and to quote."""
+    text = (reply or "").strip()
+    for line in text.splitlines():
+        candidate = line.strip().lstrip("*-# ").strip()
+        if not candidate:
+            continue
+        # Drop a "Title:" label but keep whatever followed it on the line.
+        for label in ("professional title:", "title:"):
+            if candidate.lower().startswith(label):
+                candidate = candidate[len(label):].strip()
+                break
+        candidate = candidate.replace("**", "").strip()
+        if len(candidate) >= 2 and candidate[0] in "\"“'" and candidate[-1] in "\"”'":
+            candidate = candidate[1:-1].strip()
+        candidate = candidate.rstrip(".").strip()
+        if candidate:
+            # A model that ignores "output only the title" tends to write a
+            # sentence. Anything that long is prose, not a headline.
+            return candidate[:80]
+    return ""
+
+
+async def _generate_title(
+    chat: "DeepSeekConversation | None",
+    job1: JobSelection,
+    job2: JobSelection,
+    summary: str,
+    current_title: str,
+    job_description: str,
+    job_title: str,
+) -> tuple[str, str]:
+    """Step 5: the resume headline, written once the summary exists.
+
+    Returns (title, source) where source is 'deepseek' or 'none'. Like the
+    summary there is no deterministic fallback -- a title is a claim about what
+    the candidate is, and composing one from a template would be inventing it.
+    When unavailable the resume keeps the profile's own title.
+    """
+    from app.services import settings_service
+
+    bullets = [*job2.bullets, *job1.bullets]
+    if not bullets:
+        return "", "none"
+
+    template = (settings_service.get_settings().get("titlePrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_TITLE_PROMPT
+
+    prompt = settings_service.render_template(
+        template,
+        {
+            "job_title": job_title or "this role",
+            "current_title": current_title or "(none set)",
+            "job_description": job_description[:4000],
+            "summary": summary,
+            "bullets": "\n".join(f"- {b}" for b in bullets),
+        },
+    )
+
+    progress.emit("title", "Writing the resume title…", level="step")
+
+    if chat is None:
+        progress.emit(
+            "title", "DeepSeek unavailable — keeping the profile's own title", level="warn"
+        )
+        return "", "none"
+
+    try:
+        title = _clean_title(await chat.ask(prompt))
+        if title:
+            progress.emit("title", f"Title: {title}", level="result", preview=title)
+            return title, "deepseek"
+        progress.emit("title", "DeepSeek returned an empty title", level="warn")
+    except Exception as exc:  # noqa: BLE001 - provider unavailable
+        progress.emit(
+            "title",
+            f"Title generation failed ({type(exc).__name__}) — "
+            "keeping the profile's own title",
+            level="warn",
+        )
+    return "", "none"
+
+
 async def extract_experience(
     db: ExperienceDatabase,
     first_company: str,
@@ -700,6 +784,7 @@ async def extract_experience(
     tech_skills: Sequence[str] | None = None,
     job_title: str = "",
     job_mission: str = "",
+    current_title: str = "",
 ) -> dict[str, Any]:
     if not (first_company or "").strip():
         raise ExperienceExtractionError("Please select a First Company in Settings first.")
@@ -751,9 +836,14 @@ async def extract_experience(
             chat, job2_picked, job2_sel, job_description, JOB2_BULLET_COUNT
         )
 
-        # Step 4: the summary is written last, from the bullets that now exist.
+        # Step 4: the summary is written from the bullets that now exist.
         summary, summary_source = await _generate_summary(
             chat, job1_sel, job2_sel, job_description, job_title
+        )
+
+        # Step 5: the headline, which reads better once the summary is settled.
+        generated_title, title_source = await _generate_title(
+            chat, job1_sel, job2_sel, summary, current_title, job_description, job_title
         )
 
         turns = chat.turns if chat else 0
@@ -762,7 +852,7 @@ async def extract_experience(
         "done",
         f"Finished: {len(job1_sel.bullets)} + {len(job2_sel.bullets)} bullets "
         f"({job1_sel.company} → {job2_sel.company})"
-        + (f", summary, {turns} DeepSeek turns in 1 session" if turns else ""),
+        + (f", summary, title, {turns} DeepSeek turns in 1 session" if turns else ""),
         level="result",
         job1={"company": job1_sel.company, "product": job1_sel.product,
               "bullets": len(job1_sel.bullets)},
@@ -785,6 +875,8 @@ async def extract_experience(
         "job2": job2_sel.__dict__,
         "summary": summary,
         "summarySource": summary_source,
+        "title": generated_title,
+        "titleSource": title_source,
         "search": vector_search.backend(),
         # 'fallback' on either half means the AI provider wasn't used, which the
         # UI surfaces rather than passing template text off as generated.
@@ -830,6 +922,7 @@ def _store_run(conn, job_row, payload: dict[str, Any]) -> None:
             user_id=job_row.user_id,
             state="succeeded",
             summary=payload.get("summary") or "",
+            generated_title=payload.get("title") or "",
             generator=payload.get("generator") or "fallback",
             search_mode=search.get("mode") or "lexical",
             search_model=search.get("model") or "",
@@ -906,6 +999,8 @@ def _load_run(conn, job_row) -> dict[str, Any] | None:
         "job2": {},
         "summary": run.summary,
         "summarySource": "deepseek" if run.summary else "none",
+        "title": run.generated_title,
+        "titleSource": "deepseek" if run.generated_title else "none",
         "search": {"mode": run.search_mode, "model": run.search_model or None,
                    "detail": None},
         "generator": run.generator,

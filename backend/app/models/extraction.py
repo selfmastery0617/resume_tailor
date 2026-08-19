@@ -43,8 +43,11 @@ extraction_runs = Table(
     ),
     Column("user_id", UUID(as_uuid=True), nullable=False),
     Column("state", String(16), nullable=False, server_default=text("'running'")),
-    # The resume summary written from the bullets, in the last turn of the chat.
+    # The resume summary written from the bullets, late in the same chat.
     Column("summary", Text, nullable=False, server_default=text("''")),
+    # The professional title written for this specific role, after the summary.
+    # Named generated_title so it is never confused with the job's own title.
+    Column("generated_title", Text, nullable=False, server_default=text("''")),
     Column("job_mission", Text, nullable=False, server_default=text("''")),
     # 'fallback' means the provider was unavailable and bullets came straight
     # from the corpus — surfaced rather than passed off as generated.

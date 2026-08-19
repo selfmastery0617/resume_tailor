@@ -16,6 +16,9 @@ export interface ExperienceResult {
   /** Resume summary written from the bullets above; "" when unavailable. */
   summary: string;
   summarySource: "deepseek" | "none";
+  /** Resume headline written for this job; "" when unavailable. */
+  title: string;
+  titleSource: "deepseek" | "none";
   /** Prompts that shared this job's single DeepSeek chat; 0 = never connected. */
   deepseekTurns: number;
   search: { mode: "semantic" | "lexical"; model: string | null; detail: string | null };

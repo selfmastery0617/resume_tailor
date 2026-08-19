@@ -118,12 +118,17 @@ def build_tailored_data(profile: Profile, experience: dict[str, Any]) -> ResumeD
 
     data.experience = roles
 
-    # The extraction's summary is written for this specific job, so it wins over
-    # the profile's general one. An empty summary (DeepSeek unavailable) leaves
-    # the profile's own text in place rather than blanking the section.
+    # The extraction's summary and title are written for this specific job, so
+    # they win over the profile's general ones. Empty values (DeepSeek
+    # unavailable) leave the profile's own text in place rather than blanking
+    # the headline of the resume.
     summary = (experience.get("summary") or "").strip()
     if summary:
         data.profile.summary = summary
+
+    title = (experience.get("title") or "").strip()
+    if title:
+        data.profile.professionalTitle = title
 
     return data
 

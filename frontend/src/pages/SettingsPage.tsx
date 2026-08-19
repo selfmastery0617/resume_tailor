@@ -40,6 +40,15 @@ const SUMMARY_PLACEHOLDERS = [
   "bullets",
 ] as const;
 
+/** Mirrors TITLE_PLACEHOLDERS in backend settings_service.py. */
+const TITLE_PLACEHOLDERS = [
+  "job_title",
+  "current_title",
+  "job_description",
+  "summary",
+  "bullets",
+] as const;
+
 function PlaceholderList({ tokens }: { tokens: readonly string[] }) {
   return (
     <>
@@ -93,6 +102,9 @@ export function SettingsPage() {
   );
   const missingSummaryPlaceholders = SUMMARY_PLACEHOLDERS.filter(
     (token) => !(draft?.summaryPrompt ?? "").includes(`{${token}}`),
+  );
+  const missingTitlePlaceholders = TITLE_PLACEHOLDERS.filter(
+    (token) => !(draft?.titlePrompt ?? "").includes(`{${token}}`),
   );
 
   // Mirrors build_tailored_pdf_filename() so the file name is visible before
@@ -289,7 +301,7 @@ export function SettingsPage() {
       <section className="settings-section">
         <h2>Prompts</h2>
         <p className="notice">
-          All four prompts for one job run as turns in a{" "}
+          All five prompts for one job run as turns in a{" "}
           <strong>single DeepSeek chat</strong>, so each one still has the
           earlier answers in context.
         </p>
@@ -348,6 +360,29 @@ export function SettingsPage() {
           {missingSummaryPlaceholders.length > 0 && (
             <p className="notice exp-warn">
               Missing {missingSummaryPlaceholders.map((t) => `{${t}}`).join(", ")}{" "}
+              — the model won't receive that context.
+            </p>
+          )}
+        </div>
+
+        <div className="prompt-section">
+          <label htmlFor="settings-title-prompt">4. Title generation prompt</label>
+          <p className="notice">
+            Runs last, once the summary exists, and writes the professional
+            title at the top of the generated resume. Leave it blank on a job
+            and the profile's own title is used. Placeholders:{" "}
+            <PlaceholderList tokens={TITLE_PLACEHOLDERS} />.
+          </p>
+          <textarea
+            id="settings-title-prompt"
+            className="prompt-textarea"
+            rows={12}
+            value={draft.titlePrompt}
+            onChange={(event) => update("titlePrompt", event.target.value)}
+          />
+          {missingTitlePlaceholders.length > 0 && (
+            <p className="notice exp-warn">
+              Missing {missingTitlePlaceholders.map((t) => `{${t}}`).join(", ")}{" "}
               — the model won't receive that context.
             </p>
           )}

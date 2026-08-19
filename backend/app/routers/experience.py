@@ -179,6 +179,15 @@ async def extract(payload: ExtractRequest):
     except ExperienceDatabaseError as exc:
         raise _bad_request("INVALID_DATABASE", str(exc)) from exc
 
+    # The title step is asked to improve on what the profile already claims, so
+    # it needs to know what that is.
+    from app.services import profile_service
+
+    try:
+        current_title = profile_service.get_profile(target).data.profile.professionalTitle
+    except profile_service.ProfileNotFound:
+        current_title = ""
+
     try:
         result = await experience_service.extract_experience(
             db=db,
@@ -187,6 +196,7 @@ async def extract(payload: ExtractRequest):
             tech_skills=payload.techSkills,
             job_title=payload.jobTitle,
             job_mission=payload.jobMission,
+            current_title=current_title,
         )
     except ExperienceExtractionError as exc:
         raise _bad_request("EXTRACTION_FAILED", str(exc)) from exc
