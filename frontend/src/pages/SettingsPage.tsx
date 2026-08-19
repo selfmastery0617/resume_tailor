@@ -49,15 +49,6 @@ const TITLE_PLACEHOLDERS = [
   "bullets",
 ] as const;
 
-/** Mirrors CORPUS_PLACEHOLDERS in backend settings_service.py. */
-const CORPUS_PLACEHOLDERS = [
-  "schema",
-  "full_name",
-  "professional_title",
-  "experience",
-  "notes",
-] as const;
-
 function PlaceholderList({ tokens }: { tokens: readonly string[] }) {
   return (
     <>
@@ -114,9 +105,6 @@ export function SettingsPage() {
   );
   const missingTitlePlaceholders = TITLE_PLACEHOLDERS.filter(
     (token) => !(draft?.titlePrompt ?? "").includes(`{${token}}`),
-  );
-  const missingCorpusPlaceholders = CORPUS_PLACEHOLDERS.filter(
-    (token) => !(draft?.corpusPrompt ?? "").includes(`{${token}}`),
   );
 
   // Mirrors build_tailored_pdf_filename() so the file name is visible before
@@ -406,12 +394,11 @@ export function SettingsPage() {
             Database generation prompt
           </label>
           <p className="notice">
-            Not part of extraction. Drafts a profile's{" "}
-            <code>database.json</code> from its experience section, on demand
-            from the <strong>Profile</strong> tab. <code>{"{schema}"}</code> is
-            filled with the shape the parser accepts, so editing the wording
-            cannot drift from it. Placeholders:{" "}
-            <PlaceholderList tokens={CORPUS_PLACEHOLDERS} />.
+            Stored, not sent. This is the prompt you paste into your AI tool to
+            produce a <code>database.json</code>, kept here so the wording that
+            produced a corpus is recorded beside it and the next profile can
+            start from the same instructions. Paste the result into the
+            database editor on the <strong>Profile</strong> tab.
           </p>
           <textarea
             id="settings-corpus-prompt"
@@ -420,12 +407,6 @@ export function SettingsPage() {
             value={draft.corpusPrompt}
             onChange={(event) => update("corpusPrompt", event.target.value)}
           />
-          {missingCorpusPlaceholders.length > 0 && (
-            <p className="notice exp-warn">
-              Missing {missingCorpusPlaceholders.map((t) => `{${t}}`).join(", ")}{" "}
-              — the model won't receive that context.
-            </p>
-          )}
         </div>
       </section>
 

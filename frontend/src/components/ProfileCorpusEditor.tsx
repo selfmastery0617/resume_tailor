@@ -9,7 +9,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   fetchDatabaseExample,
   fetchExperienceDatabase,
-  generateExperienceDatabase,
   saveExperienceDatabase,
   type DatabaseInfo,
 } from "../api/experience";
@@ -25,8 +24,6 @@ export function ProfileCorpusEditor({ profileId, profileName }: ProfileCorpusEdi
   const [text, setText] = useState("");
   const [firstCompany, setFirstCompany] = useState("");
   const [saving, setSaving] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [notes, setNotes] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -84,35 +81,6 @@ export function ProfileCorpusEditor({ profileId, profileName }: ProfileCorpusEdi
       setError(detail ?? "Could not save database.json.");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleGenerate = async () => {
-    if (!profileId) return;
-    setGenerating(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const draft = await generateExperienceDatabase(profileId, notes);
-      // Straight into the editor, unsaved: the model is phrasing someone's
-      // career, and a wrong metric written to disk becomes one on a resume.
-      setText(draft.text);
-      if (draft.valid) {
-        setNotice(
-          `Drafted from ${draft.companies.length} compan${draft.companies.length === 1 ? "y" : "ies"} ` +
-            `(${draft.companies.join(", ")}). Review it, then save.`,
-        );
-      } else {
-        setError(
-          `The draft is not valid JSON yet: ${draft.detail}. It is in the editor — fix it and save.`,
-        );
-      }
-    } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: { message?: string } } } })
-        .response?.data?.detail?.message;
-      setError(detail ?? "Could not generate a database.json.");
-    } finally {
-      setGenerating(false);
     }
   };
 
@@ -185,25 +153,6 @@ export function ProfileCorpusEditor({ profileId, profileName }: ProfileCorpusEdi
       )}
 
       <div className="prompt-section">
-        <label htmlFor="corpus-notes">
-          Notes for generation <span className="corpus-optional">(optional)</span>
-        </label>
-        <p className="notice">
-          Anything the experience section above does not say but should be
-          reflected — product names, team sizes, metrics. Used only when you
-          press Generate.
-        </p>
-        <textarea
-          id="corpus-notes"
-          className="prompt-textarea"
-          rows={3}
-          value={notes}
-          onChange={(event) => setNotes(event.target.value)}
-          placeholder="e.g. At Amazon the product was S3 metadata indexing; led a team of 8."
-        />
-      </div>
-
-      <div className="prompt-section">
         <label htmlFor="database-json">database.json</label>
         <textarea
           id="database-json"
@@ -240,16 +189,6 @@ export function ProfileCorpusEditor({ profileId, profileName }: ProfileCorpusEdi
         </button>
         <button type="button" onClick={() => void handleExample()}>
           Load example
-        </button>
-        <button
-          type="button"
-          className="primary"
-          onClick={() => void handleGenerate()}
-          disabled={generating}
-          title="Draft this profile's database.json from its experience section"
-        >
-          {generating && <span className="spinner" aria-hidden="true" />}
-          {generating ? "Generating…" : "✨ Generate with AI"}
         </button>
         <span className="corpus-path" title={info?.path}>
           {info?.exists ? info.path : "not saved yet"}

@@ -105,46 +105,59 @@ TITLE_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
-# Turns a profile's experience into the career corpus the pipeline ranks
-# against. Run on demand from the Profile tab, not as part of extraction.
+# The prompt used to produce a profile's database.json. Stored only — the
+# application never sends it. It is kept here so the wording that produced a
+# corpus is recorded beside the corpus, rather than living in someone's notes
+# app, and so the next profile can start from the same instructions.
 #
-# The schema is supplied as a placeholder rather than written into the prompt,
-# so editing the wording cannot drift from the shape the parser accepts.
-DEFAULT_CORPUS_PROMPT = """Convert the experience below into a career database, as JSON.
+# Written to stand alone, with the schema inline and no placeholders, because
+# it is copied into an AI tool by hand. A {token} nothing substitutes would be
+# pasted verbatim and confuse the model.
+DEFAULT_CORPUS_PROMPT = """Convert my experience into a career database, as JSON.
 
 Rules:
 - Output only the JSON array. No markdown fence, no commentary before or after.
-- Use only what the experience states. Do not invent employers, products, dates,
+- Use only what my experience states. Do not invent employers, products, dates,
   metrics, or technologies. If something is not stated, leave it out.
 - Give every challenge a unique id: lowercase, company_product_project_challengeN.
 - challenge, action, achievement and business_impact are one sentence each.
 - seniority_indicator describes scope: who was led, who it was presented to.
-- skills_used must list the technologies and disciplines each challenge names.
+- skills_used lists the technologies and disciplines each challenge names.
   Never leave it empty when any are mentioned.
-- Split each role into two projects where the experience describes two distinct
+- Split each role into two projects where my experience describes two distinct
   pieces of work, and give each project two challenges where there is enough
   detail for two. Where there is not, write fewer — one real challenge beats two
-  with an invented half. Selection prefers products with two projects, so split
-  wherever the material genuinely supports it.
+  with an invented half.
 
 Schema:
-{schema}
+[
+  {
+    "company": "Acme",
+    "product": "Acme Payments",
+    "timeline": "2019 - 2022",
+    "summary": "One sentence on what the product does and my part in it.",
+    "projects": [
+      {
+        "name": "Settlement pipeline",
+        "description": "One sentence on the project.",
+        "challenges": [
+          {
+            "id": "acme_payments_settlement_challenge1",
+            "challenge": "The problem, in one sentence.",
+            "action": "What I did about it, in one sentence.",
+            "achievement": "The measurable result, in one sentence.",
+            "business_impact": "Why it mattered to the business.",
+            "skills_used": ["Python", "PostgreSQL"],
+            "seniority_indicator": "Who I led and who I presented to."
+          }
+        ]
+      }
+    ]
+  }
+]
 
-Candidate: {full_name}, {professional_title}
-
-Experience:
-{experience}
-
-Additional notes:
-{notes}"""
-
-CORPUS_PLACEHOLDERS: tuple[str, ...] = (
-    "schema",
-    "full_name",
-    "professional_title",
-    "experience",
-    "notes",
-)
+My experience:
+"""
 
 SUMMARY_PLACEHOLDERS: tuple[str, ...] = (
     "sentences",

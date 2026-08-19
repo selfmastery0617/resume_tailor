@@ -59,27 +59,6 @@ export async function saveExperienceDatabase(
   return response.data;
 }
 
-export interface GeneratedCorpus {
-  text: string;
-  valid: boolean;
-  detail: string | null;
-  companies: string[];
-}
-
-/** Draft a corpus from the profile's own experience. Returns it for review;
- *  nothing is saved until the user presses save. */
-export async function generateExperienceDatabase(
-  profileId: string,
-  notes = "",
-): Promise<GeneratedCorpus> {
-  const response = await axios.post<GeneratedCorpus>(
-    `${BACKEND_URL}/api/experience/database/generate`,
-    { notes },
-    { params: { profileId } },
-  );
-  return response.data;
-}
-
 /** The expected shape, for a profile starting from nothing. */
 export async function fetchDatabaseExample(): Promise<string> {
   const response = await axios.get<{ text: string }>(
