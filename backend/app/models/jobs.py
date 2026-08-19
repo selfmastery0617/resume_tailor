@@ -10,6 +10,7 @@ from __future__ import annotations
 from sqlalchemy import (
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -28,15 +29,25 @@ from .base import metadata, owned_by, pk_column, timestamps
 # What the application has done. Advances on its own; never hand-edited.
 PIPELINE_STATES = ("imported", "extracted", "generated")
 
-# What the user did in the outside world. Only the user sets this.
+# What the user did in the outside world.
+#
+# 'not_applied' is what the table shows as an empty Status: a row nothing has
+# happened to yet. 'ready' is set by the application when a resume exists, and
+# is the only value the user can move away from — the table never lets a status
+# go back to empty, because "no resume yet" is not something a person chooses.
 APPLICATION_STATUSES = (
     "not_applied",
+    "ready",
     "applied",
     "interviewing",
     "offer",
     "rejected",
     "withdrawn",
 )
+
+# Statuses that mean an application was actually submitted, and therefore carry
+# a date. Kept beside the CHECK below so the two cannot drift.
+APPLIED_STATUSES = ("applied", "interviewing", "offer", "rejected", "withdrawn")
 
 APPLICATION_EVENT_KINDS = (
     "applied",
@@ -112,6 +123,10 @@ jobs = Table(
         server_default=text("'not_applied'"),
     ),
     Column("applied_at", DateTime(timezone=True), nullable=True),
+    # The date the job was added. Editable, and auto-stamped on first edit of a
+    # row that has none, so a hand-typed row still records when it appeared.
+    # A date rather than a timestamp: nobody edits the minute they added a job.
+    Column("date_added", Date, nullable=True),
     # Which PDF was actually sent. Regenerating later must not rewrite history,
     # so this pins the document as it was at the moment of applying.
     Column("applied_document_id", UUID(as_uuid=True), nullable=True),
@@ -134,14 +149,18 @@ jobs = Table(
         name="pipeline_state_known",
     ),
     CheckConstraint(
-        "application_status IN ('not_applied', 'applied', 'interviewing',"
-        " 'offer', 'rejected', 'withdrawn')",
+        "application_status IN ('not_applied', 'ready', 'applied',"
+        " 'interviewing', 'offer', 'rejected', 'withdrawn')",
         name="application_status_known",
     ),
     # You cannot be interviewing somewhere you never applied, and you cannot
     # have applied without a date. One constraint, both directions.
+    #
+    # Written as "did they apply" rather than "is it not_applied" because there
+    # are now two states that precede applying: nothing yet, and ready to send.
     CheckConstraint(
-        "(application_status = 'not_applied') = (applied_at IS NULL)",
+        "(application_status IN ('applied', 'interviewing', 'offer', 'rejected',"
+        " 'withdrawn')) = (applied_at IS NOT NULL)",
         name="applied_at_matches_status",
     ),
     CheckConstraint(
@@ -155,7 +174,9 @@ Index(
     "ix_jobs_todo",
     jobs.c.profile_id,
     jobs.c.first_seen_at.desc(),
-    postgresql_where=text("application_status = 'not_applied' AND archived_at IS NULL"),
+    postgresql_where=text(
+        "application_status IN ('not_applied', 'ready') AND archived_at IS NULL"
+    ),
 )
 
 Index("ix_jobs_profile_status", jobs.c.profile_id, jobs.c.application_status)
@@ -192,6 +213,7 @@ Index(
 )
 
 __all__ = [
+    "APPLIED_STATUSES",
     "APPLICATION_EVENT_KINDS",
     "APPLICATION_STATUSES",
     "PIPELINE_STATES",

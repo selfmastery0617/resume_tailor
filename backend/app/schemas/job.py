@@ -33,6 +33,12 @@ class StoredJob(BaseModel):
     publish_time_desc: str = ""
     skills: str = ""
     application_status: str = "not_applied"
+    # The date the job was added, as the table shows and edits it.
+    date_added: str = ""
+    # "" | "ready" | "applied" -- what the Status column displays.
+    status: str = ""
+    # Status cannot be chosen until a resume exists for the row.
+    hasResume: bool = False
     applied_at: str | None = None
     first_seen_at: str = ""
     last_seen_at: str = ""

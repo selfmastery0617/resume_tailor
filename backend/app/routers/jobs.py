@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, ConfigDict
 
 from app.schemas.job import ExtractSkillsRequest, ExtractSkillsResponse, StoredJob
 from app.services import job_store
@@ -37,6 +38,70 @@ async def import_jobs():
     client = JobrightClient()
     listings = await client.fetch_jobs()
     return job_store.upsert_many(listings)
+
+
+class JobPatch(BaseModel):
+    """One table edit. Only the fields present are changed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    date_added: str | None = None
+    title: str | None = None
+    company: str | None = None
+    url: str | None = None
+    location: str | None = None
+    status: str | None = None
+
+
+class CreateJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    date_added: str | None = None
+    title: str = ""
+    company: str = ""
+    url: str = ""
+    location: str = ""
+
+
+class DeleteRowsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jobIds: list[str]
+
+
+def _bad_edit(exc: Exception, code: str = "INVALID_EDIT") -> HTTPException:
+    return HTTPException(status_code=400, detail={"code": code, "message": str(exc)})
+
+
+@router.post("", response_model=StoredJob, status_code=201)
+def create_job(payload: CreateJobRequest):
+    """A row typed or pasted into the empty row at the bottom of the table."""
+    try:
+        return job_store.create_job(payload.model_dump(exclude_none=True))
+    except job_store.NoProfile as exc:
+        raise _bad_edit(exc, "NO_PROFILE") from exc
+    except ValueError as exc:
+        raise _bad_edit(exc) from exc
+
+
+@router.patch("/{job_id}", response_model=StoredJob)
+def update_job(job_id: str, payload: JobPatch):
+    """Apply one cell edit. Absent fields are left alone."""
+    patch = payload.model_dump(exclude_unset=True)
+    try:
+        return job_store.update_job(job_id, patch)
+    except JobNotFound as exc:
+        raise _not_found(job_id) from exc
+    except job_store.JobLocked as exc:
+        raise _bad_edit(exc, "STATUS_LOCKED") from exc
+    except ValueError as exc:
+        raise _bad_edit(exc) from exc
+
+
+@router.post("/delete-rows")
+def delete_rows(payload: DeleteRowsRequest):
+    """Remove whole rows — Ctrl+Delete, not clearing their cells."""
+    return job_store.delete_many(payload.jobIds)
 
 
 @router.post("/{job_id}/apply", response_model=StoredJob)

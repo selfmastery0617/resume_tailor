@@ -16,8 +16,9 @@ setting, falling back to the user's default.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Iterable
+from urllib.parse import urlparse
 from uuid import UUID
 
 from sqlalchemy import Connection, delete, func, select
@@ -61,6 +62,17 @@ class NoProfile(RuntimeError):
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _today() -> date:
+    """The calendar date to stamp a row with.
+
+    Local, not UTC, unlike every timestamp here. A timestamp is an instant and
+    belongs in UTC; "the date I added this" is a calendar date, and someone
+    adding a job at 8pm expects today's date, not tomorrow's because the server
+    is already past midnight in London.
+    """
+    return datetime.now().date()
 
 
 def active_profile_id(conn: Connection | None = None) -> UUID:
@@ -131,6 +143,9 @@ def _row_to_dict(row) -> dict[str, Any]:
         "publish_time_desc": "",
         "skills": row.skills,
         "application_status": row.application_status,
+        "date_added": row.date_added.isoformat() if row.date_added else "",
+        # The three states the table shows: "" (nothing yet), Ready, Applied.
+        "status": "" if row.application_status == "not_applied" else row.application_status,
         "applied_at": row.applied_at.isoformat() if row.applied_at else None,
         "first_seen_at": row.first_seen_at.isoformat() if row.first_seen_at else "",
         "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else "",
@@ -139,6 +154,8 @@ def _row_to_dict(row) -> dict[str, Any]:
     # Nothing may act on an applied job. One flag, so the rule lives in one
     # place instead of being re-derived in every renderer.
     job["locked"] = job["applied"]
+    # Status is only selectable once there is a resume to be ready with.
+    job["hasResume"] = row.pipeline_state == "generated" or row.application_status != "not_applied"
     return job
 
 
@@ -329,3 +346,178 @@ def run_for_job(conn: Connection, job_id: str) -> UUID | None:
         .order_by(extraction_runs.c.started_at.desc())
         .limit(1)
     ).scalar()
+
+
+# --- editing -----------------------------------------------------------------
+
+# What the table may change. Everything else about a job comes from the import
+# or from the pipeline.
+EDITABLE_FIELDS = ("date_added", "title", "company", "url", "location", "status")
+
+# The two a person may choose between. 'not_applied' is reachable only by the
+# application clearing a row, never by a user: "no resume yet" is a fact about
+# the row, not a choice someone makes.
+SELECTABLE_STATUSES = ("ready", "applied")
+
+
+class JobLocked(RuntimeError):
+    """The edit is refused because the row is in a state that forbids it."""
+
+
+def _valid_url(value: str) -> bool:
+    """Good enough to decide whether a description can be fetched for it."""
+    text = (value or "").strip()
+    if not text:
+        return False
+    parsed = urlparse(text if "://" in text else f"https://{text}")
+    return bool(parsed.scheme in ("http", "https") and parsed.netloc and "." in parsed.netloc)
+
+
+def _coerce_date(value: Any) -> date | None:
+    """Accept what a person or a spreadsheet paste actually types."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%m-%d-%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"{value!r} is not a date the table understands (use YYYY-MM-DD).")
+
+
+def _has_resume(conn: Connection, job_id: UUID) -> bool:
+    return conn.execute(
+        select(generated_documents.c.id)
+        .where(generated_documents.c.job_id == job_id)
+        .limit(1)
+    ).scalar() is not None
+
+
+def create_job(fields: dict[str, Any]) -> dict[str, Any]:
+    """A row typed or pasted into the empty row at the bottom of the table."""
+    now = _now()
+    with get_db() as conn:
+        profile_id = active_profile_id(conn)
+        job_id = uuid7()
+        conn.execute(
+            jobs.insert().values(
+                id=job_id,
+                profile_id=profile_id,
+                user_id=current_user_id(),
+                source="manual",
+                # Its own id keeps (profile, source, source_job_id) meaningful
+                # without ever colliding with something imported.
+                source_job_id=str(job_id),
+                title=str(fields.get("title") or ""),
+                company=str(fields.get("company") or ""),
+                location=str(fields.get("location") or ""),
+                url=str(fields.get("url") or ""),
+                # A row is dated the day it appears, unless one was supplied.
+                date_added=_coerce_date(fields.get("date_added")) or _today(),
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+        )
+        return _row_to_dict(_find(conn, str(job_id)))
+
+
+def update_job(job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    """Apply one edit from the table.
+
+    Three rules live here rather than in the UI, so a keystroke, a paste and a
+    direct API call all behave identically:
+
+    * a row with no date gets today's on any edit, and a row that has one keeps
+      it;
+    * clearing the URL clears the description and the generated resume with it,
+      because neither can be trusted once the posting they came from is gone;
+    * status is only selectable once a resume exists.
+    """
+    unknown = set(patch) - set(EDITABLE_FIELDS)
+    if unknown:
+        raise ValueError(f"Not editable: {', '.join(sorted(unknown))}")
+
+    with get_db() as conn:
+        row = _find(conn, job_id)
+        if row is None:
+            raise JobNotFound(job_id)
+
+        values: dict[str, Any] = {}
+
+        for field in ("title", "company", "location", "url"):
+            if field in patch:
+                values[field] = str(patch[field] or "").strip()
+
+        if "date_added" in patch:
+            values["date_added"] = _coerce_date(patch["date_added"])
+
+        if "status" in patch:
+            wanted = str(patch["status"] or "").strip().lower()
+            if wanted not in SELECTABLE_STATUSES:
+                raise ValueError(f"Status must be one of {', '.join(SELECTABLE_STATUSES)}.")
+            if not _has_resume(conn, row.id):
+                raise JobLocked("Generate a resume for this job before setting its status.")
+            values["application_status"] = wanted
+            # applied_at pairs with the status, and the CHECK enforces it both ways.
+            values["applied_at"] = _now() if wanted == "applied" else None
+            if wanted == "applied":
+                conn.execute(
+                    application_events.insert().values(
+                        id=uuid7(), job_id=row.id, kind="applied",
+                        occurred_at=values["applied_at"],
+                    )
+                )
+
+        # Losing the URL invalidates everything derived from the posting.
+        if "url" in values and not _valid_url(values["url"]):
+            values["description"] = ""
+            values["pipeline_state"] = "imported"
+            values["application_status"] = "not_applied"
+            values["applied_at"] = None
+            conn.execute(
+                delete(generated_documents).where(generated_documents.c.job_id == row.id)
+            )
+            conn.execute(delete(extraction_runs).where(extraction_runs.c.job_id == row.id))
+
+        # Auto-stamp. Checked after the patch, so an explicit date still wins.
+        if values.get("date_added") is None and row.date_added is None:
+            values["date_added"] = _today()
+
+        if values:
+            values["updated_at"] = func.now()
+            conn.execute(jobs.update().where(jobs.c.id == row.id).values(**values))
+
+        return _row_to_dict(_find(conn, str(row.id)))
+
+
+def delete_many(job_ids: list[str]) -> dict[str, Any]:
+    """Remove whole rows. Deliberately distinct from clearing their cells."""
+    removed: list[str] = []
+    with get_db() as conn:
+        for job_id in job_ids:
+            row = _find(conn, job_id)
+            if row is None:
+                continue
+            conn.execute(delete(jobs).where(jobs.c.id == row.id))
+            removed.append(str(row.id))
+    return {"deleted": removed, "count": len(removed)}
+
+
+def mark_ready(job_id: str) -> None:
+    """A resume exists, so this row is ready to send.
+
+    Only moves a row nobody has applied to — regenerating a resume for a job
+    already marked applied must not walk its status backwards.
+    """
+    with get_db() as conn:
+        row = _find(conn, job_id)
+        if row is None:
+            return
+        conn.execute(
+            jobs.update()
+            .where(jobs.c.id == row.id, jobs.c.application_status == "not_applied")
+            .values(application_status="ready", updated_at=func.now())
+        )

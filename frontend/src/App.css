@@ -1225,6 +1225,87 @@ a.experience-badge:hover { text-decoration: underline; }
 
 .resume-regenerate:hover { color: var(--text-h); }
 
+/* ---- jobs table ---- */
+.jobs-page {
+  display: flex;
+  flex-direction: column;
+  /* Fill what is left of the viewport rather than a fixed height, so the grid
+     grows with the window instead of scrolling inside a short box. */
+  height: calc(100vh - 2.5rem);
+  min-height: 0;
+  gap: 0.6rem;
+}
+
+.jobs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.jobs-hint {
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  margin-right: auto;
+}
+
+.page-size {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.page-size select { padding: 0.15rem 0.3rem; }
+
+.jobs-grid {
+  flex: 1;
+  min-height: 0;
+  outline: none;
+}
+
+.jobs-grid:focus-visible { box-shadow: 0 0 0 2px var(--accent); border-radius: 8px; }
+
+/* The selected rectangle. AG Grid owns cell backgrounds, so this needs to win
+   over the row-hover and striping it applies. */
+.jobs-grid .ag-cell.cell-selected {
+  background-color: rgba(91, 147, 240, 0.18) !important;
+  box-shadow: inset 0 0 0 1px rgba(91, 147, 240, 0.45);
+}
+
+/* The always-present row for new data. Muted so it reads as a placeholder
+   rather than a job with no title. */
+.jobs-grid .ag-row.job-row--blank .ag-cell { opacity: 0.55; font-style: italic; }
+.jobs-grid .ag-row.job-row--blank .ag-cell.cell-selected { opacity: 1; }
+
+.status-tag {
+  display: inline-block;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.status-tag--applied {
+  background: rgba(62, 207, 142, 0.16);
+  color: #2fa06d;
+  border: 1px solid rgba(62, 207, 142, 0.4);
+}
+
+.status-tag--ready {
+  background: rgba(91, 147, 240, 0.16);
+  color: #4b86e0;
+  border: 1px solid rgba(91, 147, 240, 0.4);
+}
+
+.status-empty { display: inline-block; width: 1px; height: 1px; }
+
+.status-editor { width: 100%; height: 100%; border: none; background: transparent; }
+
+.description-disabled { color: var(--text-dim); }
+
 /* ---- per-profile corpus editor ---- */
 .corpus-actions {
   display: flex;

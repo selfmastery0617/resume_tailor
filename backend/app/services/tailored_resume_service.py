@@ -230,6 +230,11 @@ async def generate_for_job(
         "generatedAt": _now(),
     }
     _save_record(record, render_payload)
+    # A resume exists, so the row is ready to send. Never walks an applied row
+    # backwards -- see mark_ready.
+    from app.services import job_store
+
+    job_store.mark_ready(job_id)
 
     progress.emit(
         "resume",

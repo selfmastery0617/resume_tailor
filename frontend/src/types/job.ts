@@ -14,7 +14,13 @@ export interface Job {
 
   // -- persisted state (jobs are stored server-side now) -------------------
   source?: string;
-  application_status?: "not_applied" | "applied";
+  application_status?: string;
+  /** The date the job was added, as the table shows and edits it. */
+  date_added?: string;
+  /** "" | "ready" | "applied" — what the Status column displays. */
+  status?: string;
+  /** Status cannot be chosen until a resume exists for the row. */
+  hasResume?: boolean;
   /** ISO timestamp, null until the job is marked applied. */
   applied_at?: string | null;
   applied?: boolean;

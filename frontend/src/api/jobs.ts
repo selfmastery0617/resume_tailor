@@ -13,6 +13,30 @@ export async function importJobs(): Promise<Job[]> {
   return response.data;
 }
 
+/** A row typed or pasted into the empty row at the bottom of the table. */
+export async function createJob(fields: Record<string, string>): Promise<Job> {
+  const response = await axios.post<Job>(`${BACKEND_URL}/api/jobs`, fields);
+  return response.data;
+}
+
+/** One cell edit. Only the fields sent are changed. */
+export async function updateJob(jobId: string, patch: Record<string, string>): Promise<Job> {
+  const response = await axios.patch<Job>(
+    `${BACKEND_URL}/api/jobs/${encodeURIComponent(jobId)}`,
+    patch,
+  );
+  return response.data;
+}
+
+/** Whole rows — Ctrl+Delete, not clearing their cells. */
+export async function deleteJobRows(jobIds: string[]): Promise<{ count: number }> {
+  const response = await axios.post<{ count: number }>(
+    `${BACKEND_URL}/api/jobs/delete-rows`,
+    { jobIds },
+  );
+  return response.data;
+}
+
 /** Records that this job was applied to. The row is read-only afterwards. */
 export async function markJobApplied(jobId: string): Promise<Job> {
   const response = await axios.post<Job>(
