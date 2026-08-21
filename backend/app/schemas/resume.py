@@ -30,6 +30,9 @@ class Experience(BaseModel):
     endDate: str = ""
     # RG-FR-007: current roles render "Present" instead of an end date.
     current: bool = False
+    # Optional company/product context rendered separately from achievement
+    # bullets by layout v2 templates.
+    companySummary: str = ""
     # Newline-separated; each line becomes its own bullet (RG-FR-005).
     description: str = ""
 

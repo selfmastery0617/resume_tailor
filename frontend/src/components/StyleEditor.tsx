@@ -7,15 +7,8 @@
  */
 
 import type { ReactNode } from "react";
+import { APPROVED_FONTS } from "../resume/fonts";
 import type { PersonalField, ResumeStyle, SectionId, TextAlign } from "../resume/types";
-
-export const APPROVED_FONTS = [
-  "Template default",
-  "Georgia",
-  "Times New Roman",
-  "Helvetica",
-  "System UI",
-] as const;
 
 export const BULLET_CHARS = ["●", "•", "◦", "-", "*", "▪", "▸"] as const;
 

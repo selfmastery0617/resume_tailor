@@ -1,14 +1,12 @@
-/** Template builder (steps 5-6).
+/** Constrained, flow-based template builder.
  *
- *  Structure panel on the left, live preview in the middle, block properties on
- *  the right. Every structural edit has a keyboard-operable control (add,
- *  remove, ↑/↓, column dropdown); drag-and-drop is layered on top rather than
- *  being the only way to do something (§9.4).
- *
- *  Edits are local until Save — the same contract as the style editor.
+ * A v2 template always owns the same semantic resume blocks. Users arrange
+ * those blocks in page columns, then arrange each block's allowed sections in
+ * rows and columns. There are no arbitrary coordinates, so variable-length
+ * content can still paginate naturally.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   createTemplate,
   deleteTemplate,
@@ -17,36 +15,63 @@ import {
 } from "../api/builder";
 import { fetchProfiles, fetchTemplates } from "../api/templates";
 import { ResumePreview } from "../components/ResumePreview";
-import type { LayoutBlock, LayoutBlockType, TemplateLayout } from "../resume/LayoutRenderer";
+import { APPROVED_FONTS } from "../resume/fonts";
+import type {
+  Flow,
+  FlowColumn,
+  FlowItem,
+  LayoutDivider,
+  SemanticBlock,
+  TemplateLayout,
+  TemplateLayoutV1,
+  TemplateLayoutV2,
+} from "../resume/layoutTypes";
 import {
   BLOCK_LABELS,
-  SINGLETON_BLOCKS,
-  addBlock,
+  SECTION_LABELS,
+  addFlowRow,
+  addSummary,
   blocksInColumn,
+  flowFor,
+  hasSection,
+  isCompactEntryColumn,
+  isTemplateLayoutV2,
+  mergeSectionIntoPreviousColumn,
   moveBlock,
   moveBlockToColumn,
-  placeBlock,
-  removeBlock,
+  moveSection,
+  moveSectionBy,
+  moveSectionToNewRow,
+  removeFlowRow,
+  removeSummary,
+  sectionColorField,
+  setBlockDivider,
+  setBlockLabel,
+  setDividerDefaultCharacter,
+  setFlowColumnDivider,
+  setFlowColumnAlign,
+  setFlowColumnMode,
+  setFlowItemDivider,
+  setFlowItemColor,
+  setFlowItemHidden,
+  setFlowRowColumnCount,
+  setFlowRowDivider,
+  setFlowRowSplit,
+  setItemDivider,
+  setOptionalLocation,
+  setPageMargin,
+  setPaperSize,
+  setPageColumnDivider,
   setRegionColumnCount,
+  setRegionDivider,
   setRegionSplit,
-  updateBlock,
-  usedSingletons,
+  splitSectionToNewColumn,
+  upgradeLegacyLayout,
+  type FlowScope,
 } from "../resume/layoutOps";
+import { PAPER_OPTIONS, pageGeometry } from "../resume/pageGeometry";
 import { SAMPLE_RESUME } from "../resume/sampleData";
 import type { Profile, ResumeStyle, TemplateDefinition } from "../resume/types";
-
-const ALL_BLOCK_TYPES: LayoutBlockType[] = [
-  "name",
-  "title",
-  "contact",
-  "summary",
-  "experience",
-  "education",
-  "skills",
-  "customText",
-  "divider",
-  "spacer",
-];
 
 interface TemplateBuilderPageProps {
   active?: boolean;
@@ -57,139 +82,234 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
   const [systemStyle, setSystemStyle] = useState<ResumeStyle | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profileId, setProfileId] = useState<string | null>(null);
-
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<TemplateLayout | null>(null);
   const [saved, setSaved] = useState<TemplateLayout | null>(null);
-  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-
+  const [draftStyle, setDraftStyle] = useState<Partial<ResumeStyle>>({});
+  const [savedStyle, setSavedStyle] = useState<Partial<ResumeStyle>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [profileWarning, setProfileWarning] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
+  const saveSequence = useRef(0);
 
-  const userTemplates = templates.filter((t) => t.source === "user");
-  const selected = templates.find((t) => t.id === selectedId) ?? null;
-  const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(saved);
+  const userTemplates = templates.filter((template) => template.source === "user");
+  const selected = templates.find((template) => template.id === selectedId) ?? null;
+  const dirty =
+    (draft !== null && JSON.stringify(draft) !== JSON.stringify(saved)) ||
+    JSON.stringify(draftStyle) !== JSON.stringify(savedStyle);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
 
   const reload = useCallback(async () => {
-    try {
-      const [catalog, profileList] = await Promise.all([fetchTemplates(), fetchProfiles()]);
+    const [catalogResult, profilesResult] = await Promise.allSettled([
+      fetchTemplates(),
+      fetchProfiles(),
+    ]);
+
+    let catalogTemplates: TemplateDefinition[] = [];
+    if (catalogResult.status === "fulfilled") {
+      const catalog = catalogResult.value;
       setTemplates(catalog.templates);
       setSystemStyle(catalog.systemDefaultStyle);
-      setProfiles(profileList);
-      setProfileId((current) => current ?? profileList[0]?.id ?? null);
-    } catch {
+      catalogTemplates = catalog.templates;
+    } else {
       setError("Could not load templates. Is the backend running?");
     }
+
+    if (profilesResult.status === "fulfilled") {
+      const profileList = profilesResult.value;
+      setProfiles(profileList);
+      setProfileId((current) =>
+        current && profileList.some((profile) => profile.id === current)
+          ? current
+          : profileList[0]?.id ?? null,
+      );
+      setProfileWarning(null);
+    } else {
+      // Profiles only supply preview data. Keep the editor usable with the
+      // bundled sample when that independent endpoint is temporarily down.
+      setProfiles([]);
+      setProfileId(null);
+      setProfileWarning("Profiles are unavailable, so the preview is using sample data.");
+    }
+
+    return catalogTemplates;
   }, []);
 
   useEffect(() => {
     if (active) void reload();
   }, [active, reload]);
 
-  // Open a template for editing.
-  const open = (template: TemplateDefinition | null) => {
-    setSelectedId(template?.id ?? null);
-    setSelectedBlockId(null);
+  const open = useCallback((template: TemplateDefinition | null) => {
     const layout = (template?.layout as TemplateLayout | undefined) ?? null;
+    setSelectedId(template?.id ?? null);
+    selectedIdRef.current = template?.id ?? null;
     setDraft(layout ? structuredClone(layout) : null);
     setSaved(layout ? structuredClone(layout) : null);
+    const templateStyle = structuredClone(template?.defaultStyle ?? {});
+    setDraftStyle(templateStyle);
+    setSavedStyle(structuredClone(templateStyle));
     setNotice(null);
+    setError(null);
+  }, []);
+
+  const requestOpen = (template: TemplateDefinition | null) => {
+    if (dirty && !window.confirm("Discard unsaved template changes?")) return;
+    open(template);
   };
 
   useEffect(() => {
     if (!dirty) return;
-    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
 
-  const activeProfile = profiles.find((p) => p.id === profileId) ?? null;
-  const previewData = activeProfile?.data.profile.fullName
-    ? activeProfile.data
-    : SAMPLE_RESUME;
-
+  const activeProfile = profiles.find((profile) => profile.id === profileId) ?? null;
+  const previewData = activeProfile?.data.profile.fullName ? activeProfile.data : SAMPLE_RESUME;
   const effectiveStyle = useMemo<ResumeStyle | null>(() => {
     if (!systemStyle) return null;
-    return { ...systemStyle, ...(selected?.defaultStyle ?? {}) } as ResumeStyle;
-  }, [systemStyle, selected]);
+    return { ...systemStyle, ...draftStyle } as ResumeStyle;
+  }, [systemStyle, draftStyle]);
 
-  const selectedBlock: LayoutBlock | null =
-    draft?.blocks.find((b) => b.id === selectedBlockId) ?? null;
-
-  // ---- actions ----------------------------------------------------------
+  const describeError = (caught: unknown, fallback: string) =>
+    (caught as { response?: { data?: { detail?: { message?: string } } } }).response?.data
+      ?.detail?.message ?? fallback;
 
   const handleCreate = async (duplicateOf?: string) => {
+    if (dirty && !window.confirm("Discard unsaved template changes and create a new copy?")) return;
     const name = window.prompt(
       duplicateOf ? "Name for the copy" : "New template name",
       duplicateOf ? "My custom template" : "My template",
     );
     if (!name) return;
+    const selectionAtStart = selectedIdRef.current;
     setBusy(true);
     setError(null);
     try {
       const layout = duplicateOf ? undefined : await fetchDefaultLayout();
       const created = await createTemplate({ name, layout, duplicateOf });
-      await reload();
-      open(created);
+      const catalog = await reload();
+      if (selectedIdRef.current === selectionAtStart) {
+        open(catalog.find((template) => template.id === created.id) ?? created);
+      }
       setNotice(`Created “${created.name}”.`);
-    } catch {
-      setError("Could not create the template.");
+    } catch (caught) {
+      setError(describeError(caught, "Could not create the template."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUpgrade = async () => {
+    if (!selected || !draft || isTemplateLayoutV2(draft)) return;
+    const sourceId = selected.id;
+    const name = window.prompt("Name for the five-block copy", `${selected.name} (five-block)`);
+    if (!name) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const upgraded = upgradeLegacyLayout(draft as TemplateLayoutV1, selected.defaultStyle);
+      const created = await createTemplate({
+        name,
+        description: selected.description,
+        layout: upgraded,
+        defaultStyle: selected.defaultStyle,
+      });
+      const catalog = await reload();
+      if (selectedIdRef.current === sourceId) {
+        open(catalog.find((template) => template.id === created.id) ?? created);
+      }
+      setNotice(`Created “${created.name}” in the five-block builder.`);
+    } catch (caught) {
+      setError(describeError(caught, "Could not upgrade the template."));
     } finally {
       setBusy(false);
     }
   };
 
   const handleSave = async () => {
-    if (!selectedId || !draft) return;
+    if (!selectedId || !draft || !isTemplateLayoutV2(draft)) return;
+    const templateId = selectedId;
+    const snapshot = structuredClone(draft);
+    const styleSnapshot = structuredClone(draftStyle);
+    const requestNumber = ++saveSequence.current;
     setBusy(true);
     setError(null);
     try {
-      const updated = await updateTemplate(selectedId, { layout: draft });
-      setSaved(structuredClone(updated.layout as TemplateLayout));
-      setDraft(structuredClone(updated.layout as TemplateLayout));
+      const updated = await updateTemplate(templateId, {
+        layout: snapshot,
+        defaultStyle: styleSnapshot,
+      });
+      const updatedLayout = structuredClone(updated.layout as TemplateLayoutV2);
+      const updatedStyle = structuredClone(updated.defaultStyle);
+      const stillEditingSavedTemplate =
+        requestNumber === saveSequence.current && selectedIdRef.current === templateId;
+      if (stillEditingSavedTemplate) {
+        setSaved(updatedLayout);
+        setSavedStyle(updatedStyle);
+        // Do not erase edits made while the request was in flight.
+        setDraft((current) =>
+          current && JSON.stringify(current) === JSON.stringify(snapshot) ? updatedLayout : current,
+        );
+        setDraftStyle((current) =>
+          JSON.stringify(current) === JSON.stringify(styleSnapshot) ? updatedStyle : current,
+        );
+      }
       await reload();
-      setNotice(`Saved (version ${updated.version}).`);
-    } catch (err) {
-      // The backend explains exactly which rule the layout broke.
-      const detail = (err as { response?: { data?: { detail?: { message?: string } } } })
-        .response?.data?.detail?.message;
-      setError(detail ?? "Could not save the template.");
+      if (stillEditingSavedTemplate && selectedIdRef.current === templateId) {
+        setNotice(`Saved (version ${updated.version}).`);
+      }
+    } catch (caught) {
+      if (selectedIdRef.current === templateId) {
+        setError(describeError(caught, "Could not save the template."));
+      }
     } finally {
-      setBusy(false);
+      if (requestNumber === saveSequence.current) setBusy(false);
     }
   };
 
   const handleDelete = async () => {
     if (!selectedId || !window.confirm("Delete this template?")) return;
+    const templateId = selectedId;
     setBusy(true);
+    setError(null);
     try {
-      await deleteTemplate(selectedId);
+      await deleteTemplate(templateId);
       await reload();
-      open(null);
+      if (selectedIdRef.current === templateId) open(null);
       setNotice("Template deleted.");
-    } catch {
-      setError("Could not delete the template.");
+    } catch (caught) {
+      setError(describeError(caught, "Could not delete the template."));
     } finally {
       setBusy(false);
     }
   };
 
-  const mutate = (next: TemplateLayout) => {
+  const mutate = (next: TemplateLayoutV2) => {
     setDraft(next);
     setNotice(null);
   };
 
-  // ---- drag and drop (additive; every action also has a button) ----------
-
-  const onDropInColumn = (columnId: string, index: number) => {
-    if (!draft || !draggingId) return;
-    mutate(placeBlock(draft, draggingId, columnId, index));
-    setDraggingId(null);
+  const mutateStyle = (fontFamily: string) => {
+    setDraftStyle((current) => ({ ...current, fontFamily }));
+    setNotice(null);
   };
 
-  if (!systemStyle) return <p>Loading builder…</p>;
+  if (!systemStyle) {
+    return (
+      <div className="builder-page">
+        {error ? <p className="error" role="alert">{error}</p> : <p>Loading builder…</p>}
+      </div>
+    );
+  }
+
+  const v2Draft = draft && isTemplateLayoutV2(draft) ? draft : null;
+  const geometry = pageGeometry(v2Draft);
 
   return (
     <div className="builder-page">
@@ -198,69 +318,58 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
         <select
           id="builder-template"
           value={selectedId ?? ""}
-          onChange={(e) => open(templates.find((t) => t.id === e.target.value) ?? null)}
+          onChange={(event) =>
+            requestOpen(templates.find((template) => template.id === event.target.value) ?? null)
+          }
         >
           <option value="">Select a template…</option>
-          {userTemplates.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name} (v{t.version})
+          {userTemplates.map((template) => (
+            <option key={template.id} value={template.id}>
+              {template.name} (v{template.version})
             </option>
           ))}
         </select>
-        <button type="button" onClick={() => handleCreate()} disabled={busy}>
-          New
-        </button>
+        <button type="button" onClick={() => handleCreate()} disabled={busy}>New</button>
         <select
           aria-label="Duplicate a built-in template"
           value=""
-          onChange={(e) => e.target.value && handleCreate(e.target.value)}
+          onChange={(event) => event.target.value && handleCreate(event.target.value)}
           disabled={busy}
         >
           <option value="">Duplicate built-in…</option>
-          {templates
-            .filter((t) => t.source === "builtin")
-            .map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
+          {templates.filter((template) => template.source === "builtin").map((template) => (
+            <option key={template.id} value={template.id}>{template.name}</option>
+          ))}
         </select>
-
         <label htmlFor="builder-profile">Preview with</label>
         <select
           id="builder-profile"
           value={profileId ?? ""}
-          onChange={(e) => setProfileId(e.target.value || null)}
+          onChange={(event) => setProfileId(event.target.value || null)}
         >
           {profiles.length === 0 && <option value="">Sample data</option>}
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>{profile.name}</option>
           ))}
         </select>
-
         <div className="templates-actions">
           {dirty && <span className="unsaved-badge">Unsaved changes</span>}
-          <button type="button" onClick={() => open(selected)} disabled={!dirty || busy}>
-            Cancel
-          </button>
-          <button type="button" onClick={handleDelete} disabled={!selectedId || busy}>
-            Delete
-          </button>
+          <button type="button" onClick={() => open(selected)} disabled={!dirty || busy}>Cancel</button>
+          <button type="button" onClick={handleDelete} disabled={!selectedId || busy}>Delete</button>
           <button
             type="button"
             className="primary"
             onClick={handleSave}
-            disabled={!selectedId || !dirty || busy}
+            disabled={!v2Draft || !dirty || busy}
           >
             {busy ? "Saving…" : "Save template"}
           </button>
         </div>
       </div>
 
-      {error && <p className="error">{error}</p>}
-      {notice && <p className="notice">{notice}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
+      {profileWarning && <p className="notice" role="status">{profileWarning}</p>}
+      {notice && <p className="notice" role="status">{notice}</p>}
 
       {!draft && (
         <p className="notice">
@@ -269,140 +378,23 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
         </p>
       )}
 
-      {draft && effectiveStyle && (
-        <div className="builder-layout">
-          {/* ---- structure ---- */}
-          <aside className="builder-structure" aria-label="Template structure">
-            {draft.page.regions.map((region) => (
-              <section key={region.id} className="builder-region">
-                <header className="builder-region-head">
-                  <strong>{region.id}</strong>
-                  <select
-                    aria-label={`Columns in ${region.id}`}
-                    value={region.columns.length}
-                    onChange={(e) =>
-                      mutate(
-                        setRegionColumnCount(
-                          draft,
-                          region.id,
-                          Number(e.target.value) === 2 ? 2 : 1,
-                        ),
-                      )
-                    }
-                  >
-                    <option value={1}>1 column</option>
-                    <option value={2}>2 columns</option>
-                  </select>
-                </header>
-
-                {region.columns.length === 2 && (
-                  <label className="builder-split">
-                    Split {region.columns[0].widthPct}% / {region.columns[1].widthPct}%
-                    <input
-                      type="range"
-                      min={15}
-                      max={85}
-                      step={5}
-                      value={region.columns[0].widthPct}
-                      onChange={(e) =>
-                        mutate(setRegionSplit(draft, region.id, Number(e.target.value)))
-                      }
-                    />
-                  </label>
-                )}
-
-                <div className="builder-columns">
-                  {region.columns.map((column) => {
-                    const blocks = blocksInColumn(draft, column.id);
-                    return (
-                      <div
-                        key={column.id}
-                        className="builder-column"
-                        onDragOver={(e) => {
-                          if (draggingId) e.preventDefault();
-                        }}
-                        onDrop={() => onDropInColumn(column.id, blocks.length)}
-                      >
-                        <div className="builder-column-name">{column.id}</div>
-                        {blocks.length === 0 && <p className="notice">Empty</p>}
-                        <ul className="builder-block-list">
-                          {blocks.map((block, index) => (
-                            <li
-                              key={block.id}
-                              draggable
-                              onDragStart={() => setDraggingId(block.id)}
-                              onDragEnd={() => setDraggingId(null)}
-                              onDragOver={(e) => {
-                                if (draggingId) e.preventDefault();
-                              }}
-                              onDrop={(e) => {
-                                e.stopPropagation();
-                                onDropInColumn(column.id, index);
-                              }}
-                              className={
-                                "builder-block" +
-                                (block.id === selectedBlockId ? " builder-block--selected" : "")
-                              }
-                            >
-                              <button
-                                type="button"
-                                className="builder-block-name"
-                                onClick={() => setSelectedBlockId(block.id)}
-                                aria-pressed={block.id === selectedBlockId}
-                              >
-                                {block.id === selectedBlockId ? "▸ " : ""}
-                                {BLOCK_LABELS[block.type]}
-                              </button>
-                              <span className="builder-block-tools">
-                                <button
-                                  type="button"
-                                  aria-label={`Move ${BLOCK_LABELS[block.type]} up`}
-                                  disabled={index === 0}
-                                  onClick={() => mutate(moveBlock(draft, block.id, -1))}
-                                >
-                                  ↑
-                                </button>
-                                <button
-                                  type="button"
-                                  aria-label={`Move ${BLOCK_LABELS[block.type]} down`}
-                                  disabled={index === blocks.length - 1}
-                                  onClick={() => mutate(moveBlock(draft, block.id, 1))}
-                                >
-                                  ↓
-                                </button>
-                                <button
-                                  type="button"
-                                  aria-label={`Remove ${BLOCK_LABELS[block.type]}`}
-                                  onClick={() => {
-                                    mutate(removeBlock(draft, block.id));
-                                    if (selectedBlockId === block.id) setSelectedBlockId(null);
-                                  }}
-                                >
-                                  ✕
-                                </button>
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-
-                        <AddBlockControl
-                          layout={draft}
-                          columnId={column.id}
-                          onAdd={(type) => {
-                            const result = addBlock(draft, type, column.id);
-                            mutate(result.layout);
-                            setSelectedBlockId(result.blockId);
-                          }}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
-            ))}
+      {draft && effectiveStyle && !v2Draft && (
+        <div className="builder-layout builder-layout--legacy">
+          <aside className="builder-structure builder-legacy" aria-label="Legacy template upgrade">
+            <h2>Previous builder format</h2>
+            <p>
+              This template remains available exactly as saved, but its free-form blocks cannot be
+              edited in the five-block builder.
+            </p>
+            <p className="notice">
+              Upgrading creates a new copy. Name, title, and contact are regrouped into Header;
+              regions with more than two columns are collapsed; unsupported custom text, spacer,
+              and divider blocks are not copied.
+            </p>
+            <button type="button" className="primary" onClick={handleUpgrade} disabled={busy}>
+              Upgrade as five-block copy
+            </button>
           </aside>
-
-          {/* ---- preview ---- */}
           <div className="template-preview-pane">
             <ResumePreview
               data={previewData}
@@ -412,21 +404,109 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
               isSample={previewData === SAMPLE_RESUME}
             />
           </div>
+        </div>
+      )}
 
-          {/* ---- properties ---- */}
-          <aside className="style-pane" aria-label="Block properties">
-            <h2 className="style-pane-title">Block</h2>
-            {!selectedBlock && <p className="notice">Select a block to edit it.</p>}
-            {selectedBlock && (
-              <BlockProperties
-                layout={draft}
-                block={selectedBlock}
-                onChange={(patch) => mutate(updateBlock(draft, selectedBlock.id, patch))}
-                onMoveColumn={(columnId) =>
-                  mutate(moveBlockToColumn(draft, selectedBlock.id, columnId))
+      {v2Draft && effectiveStyle && (
+        <div className="builder-layout">
+          <TemplateStructureEditor
+            layout={v2Draft}
+            style={effectiveStyle}
+            experienceCount={previewData.experience.length}
+            educationCount={previewData.education.length}
+            onChange={mutate}
+          />
+
+          <div className="template-preview-pane">
+            <ResumePreview
+              data={previewData}
+              style={effectiveStyle}
+              template={selected}
+              layout={v2Draft}
+              isSample={previewData === SAMPLE_RESUME}
+            />
+          </div>
+
+          <aside className="style-pane builder-settings" aria-label="Template settings">
+            <h2 className="style-pane-title">Template settings</h2>
+            <label htmlFor="builder-paper-size">Paper size</label>
+            <select
+              id="builder-paper-size"
+              value={geometry.size}
+              onChange={(event) =>
+                mutate(setPaperSize(v2Draft, event.target.value as (typeof PAPER_OPTIONS)[number]["id"]))
+              }
+            >
+              {PAPER_OPTIONS.map((paper) => (
+                <option key={paper.id} value={paper.id}>{paper.label}</option>
+              ))}
+            </select>
+            <fieldset className="builder-page-margins">
+              <legend>Page margins (inches)</legend>
+              {([
+                ["top", geometry.marginTopIn],
+                ["bottom", geometry.marginBottomIn],
+                ["left", geometry.marginLeftIn],
+                ["right", geometry.marginRightIn],
+              ] as const).map(([side, value]) => (
+                <label key={side}>
+                  {side[0].toUpperCase() + side.slice(1)}
+                  <input
+                    type="number"
+                    min={0}
+                    max={2}
+                    step={0.05}
+                    value={value}
+                    onChange={(event) =>
+                      mutate(setPageMargin(v2Draft, side, Number(event.target.value)))
+                    }
+                  />
+                </label>
+              ))}
+            </fieldset>
+            <label htmlFor="builder-font-family">Font family</label>
+            <select
+              id="builder-font-family"
+              value={effectiveStyle.fontFamily}
+              onChange={(event) => mutateStyle(event.target.value)}
+            >
+              {APPROVED_FONTS.map((font) => (
+                <option key={font} value={font}>{font}</option>
+              ))}
+            </select>
+            <p className="builder-help">
+              The selected face is used when installed; preview and PDF use a matching fallback otherwise.
+            </p>
+            <label htmlFor="builder-divider-character">Default divider character</label>
+            <input
+              id="builder-divider-character"
+              className="builder-character-input"
+              value={v2Draft.dividerDefaults.character}
+              maxLength={6}
+              onChange={(event) =>
+                mutate(setDividerDefaultCharacter(v2Draft, event.target.value))
+              }
+            />
+            <p className="builder-help">
+              Character dividers use this value unless that gap has its own character.
+            </p>
+            <label className="builder-toggle">
+              <input
+                type="checkbox"
+                checked={v2Draft.blocks.some((block) => block.type === "summary")}
+                onChange={(event) =>
+                  mutate(event.target.checked ? addSummary(v2Draft) : removeSummary(v2Draft))
                 }
               />
-            )}
+              Include Summary block
+            </label>
+            <div className="builder-guidance">
+              <strong>Structured placement</strong>
+              <p>
+                Blocks stay in page columns. Sections stay inside their owning block and can be
+                placed beside or below one another, so the resume still flows across pages.
+              </p>
+            </div>
           </aside>
         </div>
       )}
@@ -434,124 +514,807 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
   );
 }
 
-function AddBlockControl({
+function TemplateStructureEditor({
   layout,
-  columnId,
-  onAdd,
+  style,
+  experienceCount,
+  educationCount,
+  onChange,
 }: {
-  layout: TemplateLayout;
-  columnId: string;
-  onAdd: (type: LayoutBlockType) => void;
+  layout: TemplateLayoutV2;
+  style: ResumeStyle;
+  experienceCount: number;
+  educationCount: number;
+  onChange: (layout: TemplateLayoutV2) => void;
 }) {
-  const used = usedSingletons(layout);
+  const pageColumns = layout.page.regions.flatMap((region) =>
+    region.columns.map((column) => ({ id: column.id, label: `${region.id} / ${column.id}` })),
+  );
+
   return (
-    <select
-      className="builder-add"
-      aria-label={`Add a block to ${columnId}`}
-      value=""
-      onChange={(e) => e.target.value && onAdd(e.target.value as LayoutBlockType)}
-    >
-      <option value="">+ Add block…</option>
-      {ALL_BLOCK_TYPES.map((type) => (
-        <option
-          key={type}
-          value={type}
-          // A profile-bound block already placed would be rejected by the
-          // validator, so it is disabled rather than offered and refused.
-          disabled={SINGLETON_BLOCKS.includes(type) && used.has(type)}
-        >
-          {BLOCK_LABELS[type]}
-          {SINGLETON_BLOCKS.includes(type) && used.has(type) ? " (used)" : ""}
-        </option>
+    <aside className="builder-structure" aria-label="Template structure">
+      <div className="builder-structure-intro">
+        <h2>Blocks and sections</h2>
+        <p>Use the controls in each card to place content. Mandatory sections cannot be removed.</p>
+      </div>
+      {layout.page.regions.map((region, regionIndex) => (
+        <section key={region.id} className="builder-region" aria-labelledby={`region-${region.id}`}>
+          {regionIndex > 0 && (
+            <DividerControl
+              label={`Horizontal divider before ${region.id} region`}
+              orientation="horizontal"
+              value={region.dividerBefore}
+              defaultCharacter={layout.dividerDefaults.character}
+              defaultColor={style.sectionColor}
+              onChange={(value) => onChange(setRegionDivider(layout, region.id, value))}
+            />
+          )}
+          <header className="builder-region-head">
+            <strong id={`region-${region.id}`}>{region.id}</strong>
+            <label>
+              <span className="sr-only">Columns in {region.id}</span>
+              <select
+                value={region.columns.length}
+                onChange={(event) =>
+                  onChange(setRegionColumnCount(layout, region.id, event.target.value === "2" ? 2 : 1))
+                }
+              >
+                <option value={1}>1 page column</option>
+                <option value={2}>2 page columns</option>
+              </select>
+            </label>
+          </header>
+          {region.columns.length === 2 && (
+            <label className="builder-split">
+              Page split {Math.round(region.columns[0].widthPct)}% / {Math.round(region.columns[1].widthPct)}%
+              <input
+                type="range"
+                min={15}
+                max={85}
+                step={5}
+                value={region.columns[0].widthPct}
+                onChange={(event) =>
+                  onChange(setRegionSplit(layout, region.id, Number(event.target.value)))
+                }
+              />
+            </label>
+          )}
+          <div className="builder-columns">
+            {region.columns.map((column, columnIndex) => {
+              const blocks = blocksInColumn(layout, column.id);
+              return (
+                <div key={column.id} className="builder-page-column">
+                  {columnIndex > 0 && (
+                    <DividerControl
+                      label={`Vertical divider before ${column.id}`}
+                      orientation="vertical"
+                      value={column.dividerBefore}
+                      defaultCharacter={layout.dividerDefaults.character}
+                      defaultColor={style.sectionColor}
+                      onChange={(value) =>
+                        onChange(setPageColumnDivider(layout, region.id, column.id, value))
+                      }
+                    />
+                  )}
+                  <div className="builder-column-name">{column.id}</div>
+                  {blocks.length === 0 && <p className="notice">No blocks in this column.</p>}
+                  <div className="builder-semantic-list">
+                    {blocks.map((block, index) => (
+                      <SemanticBlockCard
+                        key={block.id}
+                        layout={layout}
+                        block={block}
+                        baseStyle={style}
+                        index={index}
+                        siblingCount={blocks.length}
+                        pageColumns={pageColumns}
+                        repeatCount={
+                          block.type === "experience"
+                            ? experienceCount
+                            : block.type === "education"
+                              ? educationCount
+                              : 0
+                        }
+                        onChange={onChange}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
       ))}
-    </select>
+    </aside>
   );
 }
 
-function BlockProperties({
+function SemanticBlockCard({
   layout,
   block,
+  baseStyle,
+  index,
+  siblingCount,
+  pageColumns,
+  repeatCount,
   onChange,
-  onMoveColumn,
 }: {
-  layout: TemplateLayout;
-  block: LayoutBlock;
-  onChange: (patch: Partial<LayoutBlock>) => void;
-  onMoveColumn: (columnId: string) => void;
+  layout: TemplateLayoutV2;
+  block: SemanticBlock;
+  baseStyle: ResumeStyle;
+  index: number;
+  siblingCount: number;
+  pageColumns: Array<{ id: string; label: string }>;
+  repeatCount: number;
+  onChange: (layout: TemplateLayoutV2) => void;
 }) {
-  const columns = layout.page.regions.flatMap((r) =>
-    r.columns.map((c) => ({ id: c.id, region: r.id })),
+  const blockStyle = { ...baseStyle, ...(block.style ?? {}) } as ResumeStyle;
+  const heading = block.contentFlow.rows
+    .flatMap((currentRow) => currentRow.columns)
+    .flatMap((column) => column.items)
+    .find((currentItem) => currentItem.ref === "blockTitle");
+  const headingLabel = String(heading?.props?.label ?? BLOCK_LABELS[block.type]);
+  const optionalLocation = block.type === "experience" || block.type === "education";
+
+  return (
+    <div className="builder-semantic-wrap">
+      {index > 0 && (
+        <DividerControl
+          label={`Horizontal divider before ${BLOCK_LABELS[block.type]} block`}
+          orientation="horizontal"
+          value={block.dividerBefore}
+          defaultCharacter={layout.dividerDefaults.character}
+          defaultColor={blockStyle.sectionColor}
+          onChange={(value) => onChange(setBlockDivider(layout, block.id, value))}
+        />
+      )}
+      <details className="builder-semantic-block">
+        <summary>{BLOCK_LABELS[block.type]}</summary>
+        <div className="builder-block-body">
+          <div className="builder-block-actions">
+            <button
+              type="button"
+              onClick={() => onChange(moveBlock(layout, block.id, -1))}
+              disabled={index === 0}
+              aria-label={`Move ${BLOCK_LABELS[block.type]} up`}
+            >
+              Move up
+            </button>
+            <button
+              type="button"
+              onClick={() => onChange(moveBlock(layout, block.id, 1))}
+              disabled={index === siblingCount - 1}
+              aria-label={`Move ${BLOCK_LABELS[block.type]} down`}
+            >
+              Move down
+            </button>
+            {block.type === "summary" && (
+              <button type="button" onClick={() => onChange(removeSummary(layout))}>
+                Remove Summary
+              </button>
+            )}
+          </div>
+          <label className="builder-control-label">
+            Page column
+            <select
+              value={block.columnId}
+              onChange={(event) => onChange(moveBlockToColumn(layout, block.id, event.target.value))}
+            >
+              {pageColumns.map((column) => (
+                <option key={column.id} value={column.id}>{column.label}</option>
+              ))}
+            </select>
+          </label>
+          {heading && (
+            <label className="builder-control-label">
+              Block title text
+              <input
+                value={headingLabel}
+                maxLength={120}
+                onChange={(event) => onChange(setBlockLabel(layout, block.id, event.target.value))}
+              />
+            </label>
+          )}
+          {optionalLocation && (
+            <label className="builder-toggle">
+              <input
+                type="checkbox"
+                checked={hasSection(block, "item", "location")}
+                onChange={(event) =>
+                  onChange(setOptionalLocation(layout, block.id, event.target.checked))
+                }
+              />
+              Include location
+            </label>
+          )}
+
+          <FlowEditor
+            layout={layout}
+            block={block}
+            scope="content"
+            title="Block content"
+            baseStyle={blockStyle}
+            onChange={onChange}
+          />
+
+          {block.itemFlow && (
+            <div className="builder-group-editor">
+              <div className="builder-group-heading">
+                <strong>Entry group</strong>
+                <span>Repeats {repeatCount} {repeatCount === 1 ? "time" : "times"} in this preview</span>
+              </div>
+              <DividerControl
+                label="Horizontal divider between repeated groups"
+                orientation="horizontal"
+                value={block.itemDivider}
+                defaultCharacter={layout.dividerDefaults.character}
+                defaultColor={blockStyle.sectionColor}
+                onChange={(value) => onChange(setItemDivider(layout, block.id, value))}
+              />
+              <FlowEditor
+                layout={layout}
+                block={block}
+                scope="item"
+                title="Group sections"
+                baseStyle={{
+                  ...blockStyle,
+                  ...(block.contentFlow.rows
+                    .flatMap((row) => row.columns)
+                    .flatMap((column) => column.items)
+                    .find((item) => item.ref === "groups")?.style ?? {}),
+                } as ResumeStyle}
+                onChange={onChange}
+              />
+            </div>
+          )}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function FlowEditor({
+  layout,
+  block,
+  scope,
+  title,
+  baseStyle,
+  onChange,
+}: {
+  layout: TemplateLayoutV2;
+  block: SemanticBlock;
+  scope: FlowScope;
+  title: string;
+  baseStyle: ResumeStyle;
+  onChange: (layout: TemplateLayoutV2) => void;
+}) {
+  const target = flowFor(block, scope);
+  if (!target) return null;
+  const canSplitRow = target.rows.some((currentRow) =>
+    currentRow.columns.some((column) => column.items.length > 1),
   );
 
   return (
-    <div className="style-editor">
-      <div className="style-row">
-        <span className="style-label">Type</span>
-        <div className="style-control">{BLOCK_LABELS[block.type]}</div>
-      </div>
+    <fieldset className="builder-flow">
+      <legend>{title}</legend>
+      {target.rows.map((currentRow, rowIndex) => {
+        const itemCount = currentRow.columns.reduce((sum, column) => sum + column.items.length, 0);
+        const compactEntryRow =
+          scope === "item" &&
+          currentRow.columns.every((column) => isCompactEntryColumn(block, column));
+        const maxColumns = Math.min(
+          compactEntryRow ? 4 : 2,
+          itemCount,
+        );
+        return (
+          <div key={currentRow.id} className="builder-flow-row">
+            {rowIndex > 0 && (
+              <DividerControl
+                label={`Horizontal divider before row ${rowIndex + 1}`}
+                orientation="horizontal"
+                value={currentRow.dividerBefore}
+                defaultCharacter={layout.dividerDefaults.character}
+                defaultColor={baseStyle.sectionColor}
+                onChange={(value) =>
+                  onChange(setFlowRowDivider(layout, block.id, scope, currentRow.id, value))
+                }
+              />
+            )}
+            <div className="builder-row-head">
+              <strong>Row {rowIndex + 1}</strong>
+              <label>
+                <span className="sr-only">Columns in row {rowIndex + 1}</span>
+                <select
+                  value={currentRow.columns.length}
+                  onChange={(event) =>
+                    onChange(
+                      setFlowRowColumnCount(
+                        layout,
+                        block.id,
+                        scope,
+                        currentRow.id,
+                        Number(event.target.value) as 1 | 2 | 3 | 4,
+                      ),
+                    )
+                  }
+                >
+                  {Array.from({ length: maxColumns }, (_, index) => index + 1).map((count) => (
+                    <option key={count} value={count}>
+                      {count} {count === 1 ? "cell" : "cells"} in this line
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => onChange(removeFlowRow(layout, block.id, scope, currentRow.id))}
+                disabled={target.rows.length === 1}
+                aria-label={
+                  rowIndex === 0
+                    ? "Merge row 1 into row 2"
+                    : `Merge row ${rowIndex + 1} into row ${rowIndex}`
+                }
+              >
+                Merge row
+              </button>
+            </div>
+            {currentRow.columns.length === 2 && (
+              <label className="builder-split">
+                Row split {Math.round(currentRow.columns[0].widthPct)}% / {Math.round(currentRow.columns[1].widthPct)}%
+                <input
+                  type="range"
+                  min={15}
+                  max={85}
+                  step={5}
+                  value={currentRow.columns[0].widthPct}
+                  onChange={(event) =>
+                    onChange(
+                      setFlowRowSplit(
+                        layout,
+                        block.id,
+                        scope,
+                        currentRow.id,
+                        Number(event.target.value),
+                      ),
+                    )
+                  }
+                />
+              </label>
+            )}
+            <div className="builder-flow-columns">
+              {currentRow.columns.map((column, columnIndex) => (
+                <FlowColumnEditor
+                  key={column.id}
+                  layout={layout}
+                  block={block}
+                  flow={target}
+                  scope={scope}
+                  rowId={currentRow.id}
+                  rowIndex={rowIndex}
+                  column={column}
+                  columnIndex={columnIndex}
+                  rowColumnCount={currentRow.columns.length}
+                  baseStyle={baseStyle}
+                  onChange={onChange}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        className="builder-add-row"
+        onClick={() => onChange(addFlowRow(layout, block.id, scope))}
+        disabled={!canSplitRow}
+      >
+        Move last stacked section to a new row
+      </button>
+    </fieldset>
+  );
+}
 
-      <div className="style-row">
-        <label className="style-label" htmlFor="blk-column">
-          Column
-        </label>
-        <div className="style-control">
-          <select
-            id="blk-column"
-            value={block.columnId}
-            onChange={(e) => onMoveColumn(e.target.value)}
+function FlowColumnEditor({
+  layout,
+  block,
+  flow,
+  scope,
+  rowId,
+  rowIndex,
+  column,
+  columnIndex,
+  rowColumnCount,
+  baseStyle,
+  onChange,
+}: {
+  layout: TemplateLayoutV2;
+  block: SemanticBlock;
+  flow: Flow;
+  scope: FlowScope;
+  rowId: string;
+  rowIndex: number;
+  column: FlowColumn;
+  columnIndex: number;
+  rowColumnCount: number;
+  baseStyle: ResumeStyle;
+  onChange: (layout: TemplateLayoutV2) => void;
+}) {
+  const compactEntryColumn = scope === "item" && isCompactEntryColumn(block, column);
+  const destinations = flow.rows.flatMap((currentRow, destinationRowIndex) =>
+    currentRow.columns.map((currentColumn, destinationColumnIndex) => ({
+      value: `${currentRow.id}\u0000${currentColumn.id}`,
+      label: `Row ${destinationRowIndex + 1}, column ${destinationColumnIndex + 1}`,
+      rowId: currentRow.id,
+      columnId: currentColumn.id,
+    })),
+  );
+
+  return (
+    <div className="builder-flow-column">
+      {columnIndex > 0 && (
+        <DividerControl
+          label={`Vertical divider before row ${rowIndex + 1}, column ${columnIndex + 1}`}
+          orientation="vertical"
+          value={column.dividerBefore}
+          defaultCharacter={layout.dividerDefaults.character}
+          defaultColor={baseStyle.sectionColor}
+          onChange={(value) =>
+            onChange(setFlowColumnDivider(layout, block.id, scope, rowId, column.id, value))
+          }
+        />
+      )}
+      <span className="builder-column-name">Column {columnIndex + 1}</span>
+      {compactEntryColumn && (
+        <div className="builder-inline-controls">
+          {column.items.length > 1 && (
+            <label>
+              Sections in this cell
+              <select
+                value={column.mode ?? "stack"}
+                onChange={(event) =>
+                  onChange(
+                    setFlowColumnMode(
+                      layout,
+                      block.id,
+                      scope,
+                      rowId,
+                      column.id,
+                      event.target.value === "inline" ? "inline" : "stack",
+                    ),
+                  )
+                }
+              >
+                <option value="stack">Stack vertically</option>
+                <option value="inline">Merge into one line</option>
+              </select>
+            </label>
+          )}
+          <label>
+            Position in line
+            <select
+              value={column.align ?? "left"}
+              onChange={(event) =>
+                onChange(
+                  setFlowColumnAlign(
+                    layout,
+                    block.id,
+                    scope,
+                    rowId,
+                    column.id,
+                    event.target.value as "left" | "center" | "right",
+                  ),
+                )
+              }
+            >
+              <option value="left">Align left</option>
+              <option value="center">Align center</option>
+              <option value="right">Align right</option>
+            </select>
+          </label>
+        </div>
+      )}
+      {column.items.map((currentItem, itemIndex) => (
+        <FlowItemEditor
+          key={currentItem.id}
+          layout={layout}
+          block={block}
+          scope={scope}
+          rowId={rowId}
+          column={column}
+          item={currentItem}
+          itemIndex={itemIndex}
+          columnIndex={columnIndex}
+          rowColumnCount={rowColumnCount}
+          compactEntry={compactEntryColumn}
+          destinations={destinations}
+          baseStyle={baseStyle}
+          onChange={onChange}
+        />
+      ))}
+    </div>
+  );
+}
+
+function FlowItemEditor({
+  layout,
+  block,
+  scope,
+  rowId,
+  column,
+  item,
+  itemIndex,
+  columnIndex,
+  rowColumnCount,
+  compactEntry,
+  destinations,
+  baseStyle,
+  onChange,
+}: {
+  layout: TemplateLayoutV2;
+  block: SemanticBlock;
+  scope: FlowScope;
+  rowId: string;
+  column: FlowColumn;
+  item: FlowItem;
+  itemIndex: number;
+  columnIndex: number;
+  rowColumnCount: number;
+  compactEntry: boolean;
+  destinations: Array<{ value: string; label: string; rowId: string; columnId: string }>;
+  baseStyle: ResumeStyle;
+  onChange: (layout: TemplateLayoutV2) => void;
+}) {
+  const currentDestination = `${rowId}\u0000${column.id}`;
+  const colorField = sectionColorField(item.ref);
+  const explicitColor = item.style?.[colorField];
+  const currentColor =
+    typeof explicitColor === "string" ? explicitColor : String(baseStyle[colorField]);
+  return (
+    <div className="builder-flow-item-wrap">
+      {itemIndex > 0 && (
+        <DividerControl
+          label={
+            column.mode === "inline"
+              ? `Inline divider before ${SECTION_LABELS[item.ref]}`
+              : `Horizontal divider before ${SECTION_LABELS[item.ref]} section`
+          }
+          orientation={column.mode === "inline" ? "inline" : "horizontal"}
+          value={item.dividerBefore}
+          defaultCharacter={layout.dividerDefaults.character}
+          defaultColor={baseStyle.sectionColor}
+          required={column.mode === "inline"}
+          onChange={(value) =>
+            onChange(setFlowItemDivider(layout, block.id, scope, item.id, value))
+          }
+        />
+      )}
+      <div className="builder-flow-item">
+        <strong>{SECTION_LABELS[item.ref]}</strong>
+        <span className="builder-item-tools">
+          <button
+            type="button"
+            onClick={() => onChange(moveSectionBy(layout, block.id, scope, item.id, -1))}
+            disabled={itemIndex === 0}
+            aria-label={`Move ${SECTION_LABELS[item.ref]} up in its column`}
           >
-            {columns.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.region} / {c.id}
-              </option>
+            ↑
+          </button>
+          <button
+            type="button"
+            onClick={() => onChange(moveSectionBy(layout, block.id, scope, item.id, 1))}
+            disabled={itemIndex === column.items.length - 1}
+            aria-label={`Move ${SECTION_LABELS[item.ref]} down in its column`}
+          >
+            ↓
+          </button>
+        </span>
+        <label className="builder-section-visibility">
+          <input
+            type="checkbox"
+            checked={!item.hidden}
+            onChange={(event) =>
+              onChange(setFlowItemHidden(layout, block.id, scope, item.id, !event.target.checked))
+            }
+          />
+          Show section
+        </label>
+        <div className="builder-section-color">
+          <label>
+            <span>Section color</span>
+            <input
+              type="color"
+              value={currentColor}
+              onChange={(event) =>
+                onChange(setFlowItemColor(layout, block.id, scope, item.id, event.target.value))
+              }
+            />
+          </label>
+          <button
+            type="button"
+            disabled={typeof explicitColor !== "string"}
+            onClick={() => onChange(setFlowItemColor(layout, block.id, scope, item.id, null))}
+          >
+            Use inherited color
+          </button>
+        </div>
+        <label>
+          <span className="sr-only">Place {SECTION_LABELS[item.ref]}</span>
+          <select
+            value={currentDestination}
+            onChange={(event) => {
+              const destination = destinations.find((candidate) => candidate.value === event.target.value);
+              if (destination) {
+                onChange(
+                  moveSection(
+                    layout,
+                    block.id,
+                    scope,
+                    item.id,
+                    destination.rowId,
+                    destination.columnId,
+                    Number.MAX_SAFE_INTEGER,
+                  ),
+                );
+              }
+            }}
+          >
+            {destinations.map((destination) => (
+              <option key={destination.value} value={destination.value}>{destination.label}</option>
             ))}
           </select>
-        </div>
+        </label>
+        <button
+          type="button"
+          onClick={() => onChange(moveSectionToNewRow(layout, block.id, scope, item.id, rowId))}
+        >
+          Place below
+        </button>
+        {compactEntry && columnIndex > 0 && (
+          <button
+            type="button"
+            onClick={() => onChange(mergeSectionIntoPreviousColumn(layout, block.id, item.id))}
+          >
+            Merge left
+          </button>
+        )}
+        {compactEntry && column.mode === "inline" && itemIndex > 0 && rowColumnCount < 4 && (
+          <button
+            type="button"
+            onClick={() => onChange(splitSectionToNewColumn(layout, block.id, item.id))}
+          >
+            Separate into cell
+          </button>
+        )}
       </div>
+    </div>
+  );
+}
 
-      {block.type === "customText" && (
-        <>
-          <div className="prompt-section">
-            <label htmlFor="blk-heading">Heading</label>
-            <input
-              id="blk-heading"
-              value={String(block.props?.heading ?? "")}
-              onChange={(e) =>
-                onChange({ props: { ...block.props, heading: e.target.value } })
-              }
-            />
-          </div>
-          <div className="prompt-section">
-            <label htmlFor="blk-body">Text — one line per bullet</label>
-            <textarea
-              id="blk-body"
-              className="prompt-textarea"
-              rows={5}
-              value={String(block.props?.body ?? "")}
-              onChange={(e) => onChange({ props: { ...block.props, body: e.target.value } })}
-            />
-          </div>
-        </>
+function DividerControl({
+  label,
+  orientation,
+  value,
+  defaultCharacter,
+  defaultColor,
+  required = false,
+  onChange,
+}: {
+  label: string;
+  orientation: "horizontal" | "vertical" | "inline";
+  value?: LayoutDivider;
+  defaultCharacter: string;
+  defaultColor: string;
+  required?: boolean;
+  onChange: (value: LayoutDivider | null) => void;
+}) {
+  const id = useId();
+  const changeKind = (kind: LayoutDivider["kind"]) => {
+    const spacing = {
+      ...(value?.spaceBeforeIn !== undefined ? { spaceBeforeIn: value.spaceBeforeIn } : {}),
+      ...(value?.spaceAfterIn !== undefined ? { spaceAfterIn: value.spaceAfterIn } : {}),
+    };
+    const color = value?.color ? { color: value.color } : {};
+    if (kind === "none" && Object.keys(spacing).length === 0) onChange(null);
+    else if (kind === "character") {
+      onChange({
+        kind,
+        ...(value?.character ? { character: value.character } : {}),
+        ...color,
+        ...spacing,
+      });
+    } else onChange({ kind, ...color, ...spacing });
+  };
+
+  const changeSpace = (field: "spaceBeforeIn" | "spaceAfterIn", raw: string) => {
+    const next: LayoutDivider = { ...(value ?? { kind: "none" }) };
+    if (raw === "") delete next[field];
+    else next[field] = Math.max(0, Math.min(1, Number(raw)));
+    if (
+      next.kind === "none" &&
+      next.spaceBeforeIn === undefined &&
+      next.spaceAfterIn === undefined
+    ) {
+      onChange(null);
+    } else onChange(next);
+  };
+
+  return (
+    <div className={`builder-divider builder-divider--${orientation}`}>
+      <label htmlFor={`${id}-kind`}>{label}</label>
+      <select
+        id={`${id}-kind`}
+        value={value?.kind ?? (required ? "character" : "none")}
+        onChange={(event) => {
+          changeKind(event.target.value as LayoutDivider["kind"]);
+        }}
+      >
+        {!required && <option value="none">No divider</option>}
+        <option value="line">
+          {orientation === "vertical" ? "Vertical rule" : orientation === "inline" ? "Inline rule" : "Horizontal rule"}
+        </option>
+        <option value="character">Character</option>
+      </select>
+      {value?.kind === "character" && (
+        <label className="builder-divider-character">
+          <span>Character</span>
+          <input
+            value={value.character ?? defaultCharacter}
+            maxLength={6}
+            onChange={(event) =>
+              onChange({ ...value, kind: "character", character: event.target.value })
+            }
+          />
+        </label>
       )}
-
-      {block.type === "spacer" && (
-        <div className="style-row">
-          <label className="style-label" htmlFor="blk-height">
-            Height (in)
-          </label>
-          <div className="style-control">
+      {value?.kind && value.kind !== "none" && (
+        <div className="builder-divider-color">
+          <label>
+            <span>Divider color</span>
             <input
-              id="blk-height"
-              type="number"
-              min={0.05}
-              max={3}
-              step={0.05}
-              value={Number(block.props?.heightInches ?? 0.2)}
-              onChange={(e) =>
-                onChange({ props: { heightInches: Number(e.target.value) || 0.1 } })
-              }
+              type="color"
+              value={value.color ?? defaultColor}
+              onChange={(event) => onChange({ ...value, color: event.target.value })}
             />
-          </div>
+          </label>
+          <button
+            type="button"
+            disabled={!value.color}
+            onClick={() => {
+              const next = { ...value };
+              delete next.color;
+              onChange(next);
+            }}
+          >
+            Use inherited color
+          </button>
+        </div>
+      )}
+      {orientation === "horizontal" && (
+        <div className="builder-divider-spacing">
+          <label>
+            {value?.kind && value.kind !== "none" ? "Before divider (in)" : "Space before (in)"}
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              placeholder={value?.kind && value.kind !== "none" ? "Default" : "0"}
+              value={value?.spaceBeforeIn ?? ""}
+              onChange={(event) => changeSpace("spaceBeforeIn", event.target.value)}
+            />
+          </label>
+          <label>
+            {value?.kind && value.kind !== "none" ? "After divider (in)" : "Additional space (in)"}
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              placeholder={value?.kind && value.kind !== "none" ? "Default" : "0"}
+              value={value?.spaceAfterIn ?? ""}
+              onChange={(event) => changeSpace("spaceAfterIn", event.target.value)}
+            />
+          </label>
         </div>
       )}
     </div>

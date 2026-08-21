@@ -87,7 +87,10 @@ def init_db() -> list[str]:
     EXISTS string — two mechanisms racing to define the same tables is how a
     schema drifts from its own migrations.
 
-    Returns a list of notes for startup to log; empty means fully up to date.
+    Returns an empty list when fully up to date. A revision mismatch is fatal:
+    application models may already query columns introduced by the missing
+    migration, so continuing would turn one actionable startup error into
+    unrelated 500 responses across the API.
     """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
@@ -103,8 +106,11 @@ def init_db() -> list[str]:
 
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
     heads = ScriptDirectory.from_config(config).get_heads()
-    # 0002 needs pgvector and is optional, so being behind head is a normal
-    # state worth reporting, never a failure.
     if current in heads:
         return []
-    return [f"schema at {current}; head is {', '.join(heads)}"]
+    raise DatabaseNotConfigured(
+        "Database schema is out of date "
+        f"(current: {current or 'unknown'}; head: {', '.join(heads)}).\n"
+        "Upgrade it with:\n"
+        "  cd backend && python -m alembic upgrade head"
+    )

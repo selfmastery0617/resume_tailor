@@ -19,7 +19,13 @@ import {
   toBullets,
   yearRange,
 } from "./format";
-import type { ResumeData, ResumeStyle, SectionId } from "./types";
+import type {
+  Education,
+  Experience,
+  ResumeData,
+  ResumeStyle,
+  SectionId,
+} from "./types";
 
 /** Per-template presentation knobs. */
 export interface TemplateChrome {
@@ -30,20 +36,7 @@ export interface TemplateChrome {
   skillLayout?: "grouped" | "inline";
 }
 
-export function fontStack(fontFamily: string): string {
-  switch (fontFamily) {
-    case "Georgia":
-      return 'Georgia, "Times New Roman", serif';
-    case "Times New Roman":
-      return '"Times New Roman", Times, serif';
-    case "Helvetica":
-      return "Helvetica, Arial, sans-serif";
-    case "System UI":
-      return 'system-ui, "Segoe UI", Roboto, sans-serif';
-    default:
-      return 'Georgia, "Times New Roman", serif';
-  }
-}
+export { fontStack } from "./fonts";
 
 /** Renders **bold** segments without any HTML injection (RG-FR-003/004). */
 export function RichText({ text }: { text: string }) {
@@ -103,6 +96,25 @@ export function SectionHeading({
   return <div style={headingStyleFor(style, chrome)}>{children}</div>;
 }
 
+/** Atomic heading used by layout-v2 semantic blocks. */
+export function BlockTitleSection({
+  title,
+  style,
+  chrome,
+}: {
+  title: string;
+  style: ResumeStyle;
+  chrome: TemplateChrome;
+}) {
+  const text = title.trim();
+  if (!text) return null;
+  return (
+    <SectionHeading style={style} chrome={chrome}>
+      {text}
+    </SectionHeading>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Header pieces — individually placeable by the layout builder.
 // ---------------------------------------------------------------------------
@@ -144,7 +156,37 @@ export function TitleBlock({ data, style }: { data: ResumeData; style: ResumeSty
   );
 }
 
-export function ContactBlock({ data, style }: { data: ResumeData; style: ResumeStyle }) {
+/** Mirrors ContactBlock's empty-content decision for visibility-aware layouts. */
+export function hasContactContent(data: ResumeData, style: ResumeStyle): boolean {
+  const { profile } = data;
+  const address = joinParts(
+    [
+      style.showStreet ? profile.street : "",
+      style.showCity ? profile.city : "",
+      style.showState ? profile.state : "",
+      style.showPostal ? profile.postal : "",
+    ],
+    ", ",
+  );
+  const values: Record<string, string> = {
+    address,
+    phone: style.showPhone ? profile.phone : "",
+    email: style.showEmail ? profile.email : "",
+    birthday: style.showBirthday ? profile.birthday : "",
+  };
+  const hasPersonalValue = style.personalOrder.some((field) => (values[field] ?? "").trim());
+  return Boolean(hasPersonalValue || safeUrl(profile.linkedin) || safeUrl(profile.website));
+}
+
+export function ContactBlock({
+  data,
+  style,
+  separator = "•",
+}: {
+  data: ResumeData;
+  style: ResumeStyle;
+  separator?: string;
+}) {
   const { profile } = data;
 
   const addressText = joinParts(
@@ -171,6 +213,23 @@ export function ContactBlock({ data, style }: { data: ResumeData; style: ResumeS
   const website = safeUrl(profile.website);
   if (parts.length === 0 && !linkedin && !website) return null;
 
+  const separatorText = Array.from(separator.trim()).slice(0, 3).join("") || "•";
+  const contactItems: ReactNode[] = [...parts];
+  if (linkedin) {
+    contactItems.push(
+      <a href={linkedin} target="_blank" rel="noopener noreferrer" style={{ color: "inherit" }}>
+        {displayUrl(profile.linkedin)}
+      </a>,
+    );
+  }
+  if (website) {
+    contactItems.push(
+      <a href={website} target="_blank" rel="noopener noreferrer" style={{ color: "inherit" }}>
+        {displayUrl(profile.website)}
+      </a>,
+    );
+  }
+
   return (
     <div
       style={{
@@ -182,21 +241,175 @@ export function ContactBlock({ data, style }: { data: ResumeData; style: ResumeS
         marginTop: "0.04in",
       }}
     >
-      {parts.join("  •  ")}
-      {(linkedin || website) && parts.length > 0 && "  •  "}
-      {linkedin && (
-        <a href={linkedin} target="_blank" rel="noopener noreferrer" style={{ color: "inherit" }}>
-          {displayUrl(profile.linkedin)}
-        </a>
-      )}
-      {linkedin && website && "  •  "}
-      {website && (
-        <a href={website} target="_blank" rel="noopener noreferrer" style={{ color: "inherit" }}>
-          {displayUrl(profile.website)}
-        </a>
+      {contactItems.map((contactItem, index) => (
+        <span key={index}>
+          {index > 0 && `  ${separatorText}  `}
+          {contactItem}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Atomic content pieces used by layout-v2. The legacy aggregate sections below
+// remain intact so v1 layouts and built-in renderers keep their exact DOM.
+// ---------------------------------------------------------------------------
+
+export function SummaryContentBlock({ data, style }: { data: ResumeData; style: ResumeStyle }) {
+  const text = (data.profile.summary ?? "").trim();
+  // In layout-v2 the Summary block's presence owns visibility. The legacy
+  // SummarySection below continues to honour style.showSummary for built-ins.
+  if (!text) return null;
+  return (
+    <div style={bodyStyleFor(style)}>
+      <RichText text={text} />
+    </div>
+  );
+}
+
+export function SkillsContentBlock({
+  data,
+  style,
+  chrome,
+  separator = "·",
+}: {
+  data: ResumeData;
+  style: ResumeStyle;
+  chrome: TemplateChrome;
+  separator?: string;
+}) {
+  const groups = groupSkills(data.skills);
+  if (!groups.length) return null;
+  return (
+    <div style={bodyStyleFor(style)}>
+      {chrome.skillLayout === "inline" ? (
+        <div>{groups.flatMap((group) => group.names).join(` ${separator} `)}</div>
+      ) : (
+        groups.map((group) => (
+          <div key={group.category} style={{ marginBottom: `${style.bulletGapInches}in` }}>
+            <strong>{group.category}:</strong> {group.names.join(", ")}
+          </div>
+        ))
       )}
     </div>
   );
+}
+
+interface ExperienceItemProps {
+  entry: Experience;
+  style: ResumeStyle;
+}
+
+export function ExperienceCompanyName({ entry, style }: ExperienceItemProps) {
+  const text = entry.company.trim();
+  if (!text) return null;
+  return <strong style={bodyStyleFor(style)}>{text}</strong>;
+}
+
+export function ExperienceRoleTitle({ entry, style }: ExperienceItemProps) {
+  const text = entry.title.trim();
+  if (!text) return null;
+  return <strong style={bodyStyleFor(style)}>{text}</strong>;
+}
+
+export function ExperiencePeriod({ entry, style }: ExperienceItemProps) {
+  const text = dateRange(entry.startDate, entry.endDate, entry.current);
+  if (!text) return null;
+  return (
+    <span style={{ ...bodyStyleFor(style), whiteSpace: "nowrap" }}>
+      {text}
+    </span>
+  );
+}
+
+export function ExperienceLocation({ entry, style }: ExperienceItemProps) {
+  const text = entry.location.trim();
+  if (!text) return null;
+  return <div style={{ ...bodyStyleFor(style), fontStyle: "italic" }}>{text}</div>;
+}
+
+export function ExperienceCompanySummary({ entry, style }: ExperienceItemProps) {
+  const text = (entry.companySummary ?? "").trim();
+  if (!text) return null;
+  return (
+    <div style={bodyStyleFor(style)}>
+      <RichText text={text} />
+    </div>
+  );
+}
+
+export function experienceBullets(entry: Experience, style: ResumeStyle): string[] {
+  const all = toBullets(entry.description);
+  const limit = bulletLimit(style, entry.id);
+  return limit === null ? all : all.slice(0, limit);
+}
+
+export function ExperienceBullets({ entry, style }: ExperienceItemProps) {
+  const bullets = experienceBullets(entry, style);
+  if (!bullets.length) return null;
+  return (
+    <ul
+      style={{
+        ...bodyStyleFor(style),
+        margin: `${style.bulletGapInches}in 0 0 0`,
+        paddingLeft: `${style.bulletIndentInches}in`,
+        listStyle: "none",
+      }}
+    >
+      {bullets.map((bullet, index) => (
+        <li
+          key={index}
+          style={{
+            marginBottom: `${style.bulletGapInches}in`,
+            paddingLeft: "0.16in",
+            textIndent: "-0.16in",
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{ display: "inline-block", width: "0.16in", textIndent: 0 }}
+          >
+            {style.bulletChar}
+          </span>
+          <RichText text={bullet} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+interface EducationItemProps {
+  entry: Education;
+  style: ResumeStyle;
+}
+
+export function EducationUniversityName({ entry, style }: EducationItemProps) {
+  const text = entry.university.trim();
+  if (!text) return null;
+  return <strong style={bodyStyleFor(style)}>{text}</strong>;
+}
+
+export function EducationDegree({ entry, style }: EducationItemProps) {
+  const text = entry.degree.trim();
+  if (!text) return null;
+  return <strong style={bodyStyleFor(style)}>{text}</strong>;
+}
+
+export function EducationDate({ entry, style }: EducationItemProps) {
+  const text = yearRange(entry.startYear, entry.endYear);
+  if (!text) return null;
+  return (
+    <span style={{ ...bodyStyleFor(style), whiteSpace: "nowrap" }}>
+      {text}
+    </span>
+  );
+}
+
+export function EducationLocation({ entry, style }: EducationItemProps) {
+  const text = entry.location.trim();
+  if (!text) return null;
+  return <div style={{ ...bodyStyleFor(style), fontStyle: "italic" }}>{text}</div>;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +428,10 @@ export function SummarySection({ data, style, chrome, showHeading = true }: Sect
   const text = (data.profile.summary ?? "").trim();
   if (!style.showSummary || !text) return null;
   return (
-    <section style={pageBreakBefore(style, "summary")}>
+    <section
+      style={pageBreakBefore(style, "summary")}
+      data-break-before={style.forcePageBreakBeforeSections.includes("summary") ? "page" : undefined}
+    >
       {showHeading && (
         <SectionHeading style={style} chrome={chrome}>
           Summary
@@ -233,7 +449,10 @@ export function ExperienceSection({ data, style, chrome, showHeading = true }: S
   if (!entries.length) return null;
 
   return (
-    <section style={pageBreakBefore(style, "experience")}>
+    <section
+      style={pageBreakBefore(style, "experience")}
+      data-break-before={style.forcePageBreakBeforeSections.includes("experience") ? "page" : undefined}
+    >
       {showHeading && (
         <SectionHeading style={style} chrome={chrome}>
           Experience
@@ -249,11 +468,11 @@ export function ExperienceSection({ data, style, chrome, showHeading = true }: S
         return (
           <div
             key={entry.id}
+            data-break-before={breakBefore ? "page" : undefined}
             style={{
               ...bodyStyleFor(style),
               marginBottom: `${style.sectionBottomInches}in`,
               ...(breakBefore ? { breakBefore: "page" } : {}),
-              breakInside: "avoid",
             }}
           >
             <div
@@ -282,14 +501,17 @@ export function ExperienceSection({ data, style, chrome, showHeading = true }: S
                     key={index}
                     style={{
                       marginBottom: `${style.bulletGapInches}in`,
-                      display: "flex",
-                      gap: "0.06in",
+                      paddingLeft: "0.16in",
+                      textIndent: "-0.16in",
                     }}
                   >
-                    <span aria-hidden="true">{style.bulletChar}</span>
-                    <span>
-                      <RichText text={bullet} />
+                    <span
+                      aria-hidden="true"
+                      style={{ display: "inline-block", width: "0.16in", textIndent: 0 }}
+                    >
+                      {style.bulletChar}
                     </span>
+                    <RichText text={bullet} />
                   </li>
                 ))}
               </ul>
@@ -306,7 +528,10 @@ export function SkillsSection({ data, style, chrome, showHeading = true }: Secti
   if (!groups.length) return null;
 
   return (
-    <section style={pageBreakBefore(style, "skills")}>
+    <section
+      style={pageBreakBefore(style, "skills")}
+      data-break-before={style.forcePageBreakBeforeSections.includes("skills") ? "page" : undefined}
+    >
       {showHeading && (
         <SectionHeading style={style} chrome={chrome}>
           Skills
@@ -332,7 +557,10 @@ export function EducationSection({ data, style, chrome, showHeading = true }: Se
   if (!entries.length) return null;
 
   return (
-    <section style={pageBreakBefore(style, "education")}>
+    <section
+      style={pageBreakBefore(style, "education")}
+      data-break-before={style.forcePageBreakBeforeSections.includes("education") ? "page" : undefined}
+    >
       {showHeading && (
         <SectionHeading style={style} chrome={chrome}>
           Education
@@ -344,11 +572,11 @@ export function EducationSection({ data, style, chrome, showHeading = true }: Se
         return (
           <div
             key={entry.id}
+            data-break-before={breakBefore ? "page" : undefined}
             style={{
               ...bodyStyleFor(style),
               marginBottom: `${style.bulletGapInches}in`,
               ...(breakBefore ? { breakBefore: "page" } : {}),
-              breakInside: "avoid",
             }}
           >
             <div

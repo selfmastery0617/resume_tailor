@@ -5,6 +5,7 @@ export interface ExperienceJob {
   company: string;
   product: string;
   timeline: string;
+  companySummary: string;
   projects: string[];
   bullets: string[];
   source_challenge_ids: string[];

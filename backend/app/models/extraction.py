@@ -98,6 +98,7 @@ extraction_roles = Table(
     Column("company_name", Text, nullable=False, server_default=text("''")),
     Column("product_name", Text, nullable=False, server_default=text("''")),
     Column("timeline", Text, nullable=False, server_default=text("''")),
+    Column("company_summary", Text, nullable=False, server_default=text("''")),
     UniqueConstraint("run_id", "slot", name="uq_extraction_roles_run_id_slot"),
     CheckConstraint("slot IN ('job1', 'job2')", name="slot_known"),
 )

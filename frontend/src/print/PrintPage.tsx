@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from "react";
 import { BACKEND_URL } from "../config";
+import { pageGeometry } from "../resume/pageGeometry";
 import { getRenderer } from "../resume/templates";
 import type { ResumeData, ResumeStyle } from "../resume/types";
 
@@ -28,6 +29,7 @@ export function PrintPage() {
   const [ready, setReady] = useState(false);
 
   const token = new URLSearchParams(window.location.search).get("token");
+  const geometry = pageGeometry(payload?.layout);
 
   useEffect(() => {
     if (!token) {
@@ -61,7 +63,7 @@ export function PrintPage() {
           if (cancelled) return;
           // Exposed for the generator's page-count metric.
           const el = document.querySelector(".resume-document");
-          const pageHeightPx = 11 * 96;
+          const pageHeightPx = geometry.contentHeightIn * 96;
           (window as unknown as { __resumePageCount?: number }).__resumePageCount = el
             ? Math.max(1, Math.ceil(el.getBoundingClientRect().height / pageHeightPx))
             : 1;
@@ -72,7 +74,7 @@ export function PrintPage() {
     return () => {
       cancelled = true;
     };
-  }, [payload]);
+  }, [payload, geometry.contentHeightIn]);
 
   if (error) {
     return <div data-pdf-ready="error" data-pdf-error={error} />;
@@ -86,7 +88,9 @@ export function PrintPage() {
 
   return (
     <div {...(ready ? { "data-pdf-ready": "true" } : {})}>
-      <Renderer data={payload.data} style={payload.style} layout={payload.layout} />
+      <div style={{ width: `${geometry.contentWidthIn}in` }}>
+        <Renderer data={payload.data} style={payload.style} layout={payload.layout} />
+      </div>
     </div>
   );
 }

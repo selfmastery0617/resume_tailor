@@ -82,6 +82,7 @@ profile_experiences = Table(
     Column("start_date", Text, nullable=False, server_default=text("''")),
     Column("end_date", Text, nullable=False, server_default=text("''")),
     Column("is_current", Boolean, nullable=False, server_default=text("false")),
+    Column("company_summary", Text, nullable=False, server_default=text("''")),
     # Newline-separated; each line renders as a bullet.
     Column("description", Text, nullable=False, server_default=text("''")),
     Column("sort_order", Integer, nullable=False, server_default=text("0")),

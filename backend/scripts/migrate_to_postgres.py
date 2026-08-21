@@ -173,6 +173,7 @@ def migrate(apply: bool, replace: bool) -> dict[str, int]:
                         # The CHECK forbids an end date on a current role.
                         end_date="" if item.get("current") else (item.get("endDate") or ""),
                         is_current=bool(item.get("current")),
+                        company_summary=item.get("companySummary") or "",
                         description=item.get("description") or "", sort_order=order,
                     ))
                 counts["profile_experiences"] = counts.get("profile_experiences", 0) + 1
@@ -343,6 +344,11 @@ def migrate(apply: bool, replace: bool) -> dict[str, int]:
                         company_name=selection.get("company") or "",
                         product_name=selection.get("product") or "",
                         timeline=selection.get("timeline") or "",
+                        company_summary=(
+                            selection.get("companySummary")
+                            or selection.get("summary")
+                            or ""
+                        ),
                     ))
                 counts["extraction_roles"] = counts.get("extraction_roles", 0) + 1
 
