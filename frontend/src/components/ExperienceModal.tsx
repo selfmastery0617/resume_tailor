@@ -97,6 +97,12 @@ export function ExperienceModal({ result, jobLabel, onClose }: ExperienceModalPr
               in Settings and extract again for tailored wording.
             </p>
           )}
+          {result.generator === "chatgpt" && (
+            <p className="notice">
+              DeepSeek wrote the first draft; ChatGPT then revised the bullets
+              and summary below per the Final revision prompt in Settings.
+            </p>
+          )}
           {result.search.mode === "lexical" && (
             <p className="notice exp-warn">
               Ranked by keyword overlap rather than semantic similarity.

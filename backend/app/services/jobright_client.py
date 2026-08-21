@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Callable, List, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -26,12 +26,50 @@ JOBRIGHT_REFERER = "https://jobright.ai/jobs/recommend"
 
 PAGE_SIZE = 10
 MAX_FETCH_ATTEMPTS = 10
+# A role filter throws most of a page away, so the pages needed to reach a
+# limit are several times limit/PAGE_SIZE. The budget scales with what was
+# asked for and stops there: without a ceiling a role that matches nothing
+# would walk the whole feed.
+PAGE_BUDGET_MULTIPLIER = 4
+MAX_FETCH_ATTEMPTS_CEILING = 60
 PAGE_DELAY_SECONDS = 2.0
 RATE_LIMIT_BACKOFF_SECONDS = 10.0
 
 # TODO: temporary cap for faster testing -- remove (or raise) once ready to
 # pull the full recommendation feed.
+# Default when a caller does not say. The import dialog always does.
 MAX_JOBS_LIMIT = 10
+
+# (scanned, matched, listing_or_None) — called as the feed is walked, so the UI
+# can count progress and show rows as they arrive rather than after the lot.
+ProgressCallback = Callable[[int, int, "JobListing | None"], None]
+CancelCheck = Callable[[], bool]
+
+
+def _title_matches(title: str, roles: Sequence[str] | None) -> bool:
+    """Whether a job title matches any requested role.
+
+    Substring, case-insensitive, on any of the roles: "Data Engineer" is meant
+    to catch "Senior Data Engineer II" without anyone writing a pattern. No
+    roles means everything matches.
+    """
+    wanted = [r.strip().casefold() for r in (roles or []) if r.strip()]
+    if not wanted:
+        return True
+    haystack = (title or "").casefold()
+    return any(role in haystack for role in wanted)
+
+
+def _matches(
+    listing: "JobListing",
+    roles: Sequence[str] | None,
+    exclude_companies: Sequence[str] | None,
+) -> bool:
+    excluded = {c.strip().casefold() for c in (exclude_companies or []) if c.strip()}
+    if (listing.company or "").strip().casefold() in excluded:
+        return False
+    return _title_matches(listing.title, roles)
+
 
 # Tracking/source params stripped from job apply links.
 _TRACKING_PARAMS = {
@@ -177,6 +215,17 @@ def _compose_description(job_result: dict[str, Any]) -> str | None:
     return "\n\n".join(sections) if sections else None
 
 
+def _session_cookie() -> str | None:
+    """The cookie harvested by the sign-in panel, if the user has used it.
+
+    Imported lazily: jobright_session imports this module for its probe, and a
+    module-level import would close the circle.
+    """
+    from app.services.jobright_session import stored_cookie
+
+    return stored_cookie()
+
+
 def _build_headers(cookie: str) -> dict[str, str]:
     return {
         "accept": "application/json, text/plain, */*",
@@ -212,7 +261,11 @@ class JobrightClient:
     """
 
     def __init__(self, cookie: str | None = None, mock_mode: bool | None = None) -> None:
-        self.cookie = cookie or os.getenv("JOBRIGHT_COOKIE")
+        # A sign-in through the Jobright panel wins over the hand-copied
+        # JOBRIGHT_COOKIE, which stays as a fallback so an existing .env setup
+        # keeps working. Read per instance, not at import, so signing in takes
+        # effect on the next import rather than the next restart.
+        self.cookie = cookie or _session_cookie() or os.getenv("JOBRIGHT_COOKIE")
 
         if mock_mode is None:
             env_override = os.getenv("JOBRIGHT_MOCK_MODE")
@@ -224,11 +277,40 @@ class JobrightClient:
 
         self.mock_mode = mock_mode
 
-    async def fetch_jobs(self, query: str = "") -> List[JobListing]:
-        if self.mock_mode:
-            return self._mock_jobs(query)
+    async def fetch_jobs(
+        self,
+        query: str = "",
+        roles: Sequence[str] | None = None,
+        limit: int = MAX_JOBS_LIMIT,
+        exclude_companies: Sequence[str] | None = None,
+        on_progress: ProgressCallback | None = None,
+        should_cancel: CancelCheck | None = None,
+    ) -> List[JobListing]:
+        """Pull matching jobs from the recommendation feed.
 
-        raw_jobs = await self._fetch_all_raw_jobs()
+        `roles` filters titles as they arrive, so paging can stop as soon as
+        `limit` matches are found rather than after fetching everything. This
+        is a client-side filter by necessity: the endpoint is a personalised
+        feed, and there is no way to ask it for a role.
+
+        `on_progress` is called with (scanned, matched, listing_or_None) as the
+        feed is walked, so a caller can show progress and stream rows.
+        """
+        if self.mock_mode:
+            listings = self._mock_jobs(query)
+            listings = [j for j in listings if _matches(j, roles, exclude_companies)][:limit]
+            for index, listing in enumerate(listings, start=1):
+                if on_progress:
+                    on_progress(index, index, listing)
+            return listings
+
+        raw_jobs = await self._fetch_all_raw_jobs(
+            roles=roles,
+            limit=limit,
+            exclude_companies=exclude_companies,
+            on_progress=on_progress,
+            should_cancel=should_cancel,
+        )
         listings = [self._to_job_listing(job) for job in raw_jobs]
 
         if query:
@@ -241,23 +323,38 @@ class JobrightClient:
 
         return listings
 
-    async def _fetch_all_raw_jobs(self) -> list[dict[str, Any]]:
+    async def _fetch_all_raw_jobs(
+        self,
+        roles: Sequence[str] | None = None,
+        limit: int = MAX_JOBS_LIMIT,
+        exclude_companies: Sequence[str] | None = None,
+        on_progress: ProgressCallback | None = None,
+        should_cancel: CancelCheck | None = None,
+    ) -> list[dict[str, Any]]:
         if not self.cookie:
             raise RuntimeError(
-                "JobrightClient: JOBRIGHT_COOKIE is not set. Copy the Cookie "
-                "header from a logged-in request to jobright.ai/jobs/recommend "
-                "(browser devtools -> Network tab) and set it as the "
-                "JOBRIGHT_COOKIE env var, or use mock_mode for testing."
+                "Not signed in to Jobright. Open the Jobright panel from the "
+                "sidebar and sign in, or set the JOBRIGHT_COOKIE env var to a "
+                "Cookie header copied from a logged-in browser request."
             )
+
+        pages_allowed = min(
+            MAX_FETCH_ATTEMPTS_CEILING,
+            max(MAX_FETCH_ATTEMPTS, -(-limit // PAGE_SIZE) * PAGE_BUDGET_MULTIPLIER),
+        )
 
         all_jobs: list[dict[str, Any]] = []
         seen_companies: set[str] = set()
+        excluded = {c.strip().casefold() for c in (exclude_companies or []) if c.strip()}
+        scanned = 0
         position = 0
         refresh = True
         fetch_attempts = 0
 
         async with httpx.AsyncClient(base_url=JOBRIGHT_BASE_URL, timeout=15.0) as client:
-            while fetch_attempts < MAX_FETCH_ATTEMPTS:
+            while fetch_attempts < pages_allowed:
+                if should_cancel and should_cancel():
+                    break
                 fetch_attempts += 1
 
                 try:
@@ -299,9 +396,23 @@ class JobrightClient:
                     company_title = company_result.get("companyName", "N/A")
                     job_link = _clean_job_url(job_result.get("applyLink", "N/A"))
 
+                    scanned += 1
+
+                    # One job per company, as before, and LinkedIn reposts are
+                    # not applyable from here.
                     if company_title in seen_companies or "linkedin.com" in job_link:
                         continue
                     seen_companies.add(company_title)
+
+                    if company_title.strip().casefold() in excluded:
+                        if on_progress:
+                            on_progress(scanned, len(all_jobs), None)
+                        continue
+
+                    if not _title_matches(job_result.get("jobTitle", ""), roles):
+                        if on_progress:
+                            on_progress(scanned, len(all_jobs), None)
+                        continue
 
                     all_jobs.append(
                         {
@@ -319,7 +430,10 @@ class JobrightClient:
                         }
                     )
 
-                    if len(all_jobs) >= MAX_JOBS_LIMIT:
+                    if on_progress:
+                        on_progress(scanned, len(all_jobs), self._to_job_listing(all_jobs[-1]))
+
+                    if len(all_jobs) >= limit:
                         limit_reached = True
                         break
 

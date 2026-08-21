@@ -62,6 +62,44 @@ def _split_timeline(timeline: str) -> tuple[str, str, bool]:
     return start, end, False
 
 
+_YEAR = re.compile(r"(19|20)\d{2}")
+
+
+def _year_only(text: str) -> str:
+    """"Mar 2021" -> "2021". Resumes here carry years, never months."""
+    match = _YEAR.search(text or "")
+    return match.group(0) if match else ""
+
+
+def _timelines(experience: dict[str, Any]) -> dict[str, tuple[str, str, bool]]:
+    """The date range for each role, as (start, end, current).
+
+    Two settings fix both roles. The first company is the earlier one and the
+    user gives its exact years — 2016 to 2019. The later role then runs from
+    that end year to now, because there is no gap between them: 2019 to
+    Present. One number therefore appears twice, which is exactly why it is
+    stored once rather than typed into two places that can disagree.
+
+    With the years unset, the corpus timelines are used as before, reduced to
+    years so the format is the same either way.
+    """
+    from app.services import settings_service
+
+    stored = settings_service.get_settings()
+    start = (stored.get("firstCompanyStartYear") or "").strip()
+    end = (stored.get("firstCompanyEndYear") or "").strip()
+
+    if start and end:
+        return {"job1": (start, end, False), "job2": (end, "", True)}
+
+    fallback: dict[str, tuple[str, str, bool]] = {}
+    for key in ("job1", "job2"):
+        raw = (experience.get(key) or {}).get("timeline") or ""
+        from_year, to_year, current = _split_timeline(raw)
+        fallback[key] = (_year_only(from_year), _year_only(to_year), current)
+    return fallback
+
+
 def _role_details(data: ResumeData, company: str) -> tuple[str, str]:
     """Job title and location for `company`, taken from what the user wrote.
 
@@ -85,6 +123,7 @@ def build_tailored_data(profile: Profile, experience: dict[str, Any]) -> ResumeD
     that order — resumes read most-recent-first.
     """
     data = profile.data.model_copy(deep=True)
+    timelines = _timelines(experience)
 
     roles: list[Experience] = []
     for key in ("job2", "job1"):
@@ -95,7 +134,7 @@ def build_tailored_data(profile: Profile, experience: dict[str, Any]) -> ResumeD
 
         company = selection.get("company") or ""
         title, location = _role_details(data, company)
-        start, end, current = _split_timeline(selection.get("timeline") or "")
+        start, end, current = timelines.get(key, ("", "", False))
 
         roles.append(
             Experience(

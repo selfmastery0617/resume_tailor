@@ -105,6 +105,20 @@ TITLE_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
+# Step 6, the pipeline's last step: a fresh ChatGPT chat revises the bullets
+# and summary DeepSeek just wrote. No placeholders — the content is handed
+# over separately (see _build_revision_message in experience_service.py), so
+# this is pure style instruction, applied to "the resume I just gave you".
+DEFAULT_REVISION_PROMPT = """Revise this resume.
+
+- Keep a FAANG-style writing approach.
+- Clearly explain the purpose and functionality of each project so recruiters and hiring managers can easily understand what it does.
+- Include realistic, quantifiable achievements with accurate metrics.
+- Make the bullets more realistic where needed.
+- Naturally incorporate relevant technical skills into each bullet.
+- Keep each bullet 2–3 lines long.
+- Write in natural, native English."""
+
 # The prompt used to produce a profile's database.json. Stored only — the
 # application never sends it. It is kept here so the wording that produced a
 # corpus is recorded beside the corpus, rather than living in someone's notes
@@ -174,6 +188,8 @@ DEFAULTS: dict[str, Any] = {
     "summaryPrompt": DEFAULT_SUMMARY_PROMPT,
     # Step 5: the headline title, written once the summary exists.
     "titlePrompt": DEFAULT_TITLE_PROMPT,
+    # Step 6: a fresh ChatGPT chat revises the bullets and summary.
+    "revisionPrompt": DEFAULT_REVISION_PROMPT,
     # Not part of extraction: builds a profile's database.json on demand.
     "corpusPrompt": DEFAULT_CORPUS_PROMPT,
     "outputFolder": "",
@@ -183,6 +199,11 @@ DEFAULTS: dict[str, Any] = {
     # Scoped to a profile, not the user: each profile has its own corpus, so a
     # company valid for one is meaningless for another.
     "firstCompany": "",
+    # The first company's timeline, years only. Job 1 runs start->end and Job 2
+    # runs end->present, so two numbers fix both roles' dates on every tailored
+    # resume. Profile-scoped for the same reason firstCompany is.
+    "firstCompanyStartYear": "",
+    "firstCompanyEndYear": "",
     # Profile whose details and template are used for tailored resume PDFs, and
     # whose name becomes "<Profile>_resume.pdf". Empty = use the first profile.
     "resumeProfile": "",
@@ -195,14 +216,35 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# Old enough to cover any working career, and a future year is always a typo.
+EARLIEST_YEAR = 1950
+
+
+def _validate_year(key: str, value: Any) -> str:
+    """A four-digit year, or empty. Resumes carry years, never months."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not text.isdigit() or len(text) != 4:
+        raise ValueError(f"{key} must be a four-digit year, e.g. 2019.")
+    year = int(text)
+    this_year = datetime.now(timezone.utc).year
+    if year < EARLIEST_YEAR or year > this_year:
+        raise ValueError(f"{key} must be between {EARLIEST_YEAR} and {this_year}.")
+    return text
+
+
 # Settings that belong to one resume identity rather than the whole account.
-PROFILE_SCOPED: frozenset[str] = frozenset({"firstCompany"})
+PROFILE_SCOPED: frozenset[str] = frozenset(
+    {"firstCompany", "firstCompanyStartYear", "firstCompanyEndYear"}
+)
 
 PROMPT_KEYS: dict[str, str] = {
     "skillsPrompt": "skills",
     "tailoringPrompt": "tailoring",
     "summaryPrompt": "summary",
     "titlePrompt": "title",
+    "revisionPrompt": "revision",
     "corpusPrompt": "corpus",
 }
 
@@ -294,6 +336,8 @@ def validate_settings(patch: dict[str, Any]) -> dict[str, Any]:
                         f"{value!r} is not a company in this profile's database.json."
                     )
                 value = str(value).strip()
+        elif key in ("firstCompanyStartYear", "firstCompanyEndYear"):
+            value = _validate_year(key, value)
         elif key == "resumeProfile":
             if value:
                 # A deleted profile would otherwise fail at generation time with
@@ -307,6 +351,19 @@ def validate_settings(patch: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{key} must be text.")
 
         cleaned[key] = value
+
+    # Cross-field, so it can only run once both values are known. A patch may
+    # carry one year, so the other comes from what is already stored — saving
+    # an end year alone must still be checked against the stored start.
+    if "firstCompanyStartYear" in cleaned or "firstCompanyEndYear" in cleaned:
+        stored = get_settings()
+        start = cleaned.get("firstCompanyStartYear", stored.get("firstCompanyStartYear", ""))
+        end = cleaned.get("firstCompanyEndYear", stored.get("firstCompanyEndYear", ""))
+        if start and end and int(end) < int(start):
+            raise ValueError(
+                f"The first company's end year ({end}) is before its start year ({start})."
+            )
+
     return cleaned
 
 

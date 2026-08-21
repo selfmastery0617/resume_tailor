@@ -4,7 +4,6 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from app.services import settings_service
-from app.services.chatgpt import chatgpt_login
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -76,25 +75,4 @@ def select_folder(payload: FolderSelectRequest, request: Request):
         ) from exc
 
 
-# -- ChatGPT sign-in ------------------------------------------------------
-
-
-@router.get("/chatgpt/session")
-def chatgpt_session():
-    return chatgpt_login.session_status()
-
-
-@router.post("/chatgpt/login")
-async def chatgpt_start_login():
-    return await chatgpt_login.start_login()
-
-
-@router.get("/chatgpt/login/status")
-def chatgpt_login_status():
-    return chatgpt_login.login_status()
-
-
-@router.post("/chatgpt/sign-out")
-def chatgpt_sign_out():
-    chatgpt_login.sign_out()
-    return chatgpt_login.session_status()
+# ChatGPT sign-in lives in routers/chatgpt.py, beside the other providers.

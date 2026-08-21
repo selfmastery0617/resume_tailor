@@ -818,6 +818,12 @@
   background: var(--warning);
 }
 
+/* Unknown, not disconnected — the first verification loads a browser and takes
+   a few seconds, and an amber dot in the meantime reads as a real verdict. */
+.deepseek-dot--checking {
+  background: var(--text-dim);
+}
+
 .provider-state {
   color: var(--text-dim);
 }
@@ -1557,98 +1563,32 @@ button.danger:disabled {
   gap: 0.35rem;
 }
 
-/* ---- embedded sign-in panel ---- */
-.login-panel {
-  margin-top: 0.9rem;
-  border: 1px solid var(--accent-border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  padding: 0.75rem;
-}
-
-.login-panel-head {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  margin-bottom: 0.35rem;
-}
-
-.login-panel-head strong { color: var(--text-h); }
-.login-panel-head .provider-state { margin-left: auto; }
-
-.login-panel-head button {
-  background: none;
-  border: none;
-  font-size: 1.2rem;
-  line-height: 1;
-  color: var(--text-dim);
-  padding: 0 0.25rem;
-}
-
-.login-url {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  color: var(--text-dim);
-}
-
-.login-viewport {
-  margin-top: 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: #ffffff;
-  overflow: hidden;
-  outline: none;
-  min-height: 320px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-/* Focus ring matters here: typing only reaches the remote page when focused. */
-.login-viewport:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.login-viewport img {
-  display: block;
-  width: 100%;
-  height: auto;
-  cursor: pointer;
-  user-select: none;
-}
-
-.login-placeholder {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--text-dim);
-  font-size: 0.85rem;
-  padding: 2rem;
-}
-
-.login-hint {
-  margin-top: 0.5rem;
-  font-size: 0.78rem;
-}
-
-/* ---- progress console dock (right side) ---- */
-.app-shell:has(.console-dock) {
+/* ---- right-hand dock (console) ---- */
+.app-shell:has(.dock-column) {
   grid-template-columns: 210px minmax(0, 1fr) 420px;
 }
 
 @media (max-width: 1300px) {
-  .app-shell:has(.console-dock) {
+  .app-shell:has(.dock-column) {
     grid-template-columns: 210px minmax(0, 1fr) 340px;
   }
 }
 
-.console-dock {
+.dock-column {
   border-left: 1px solid var(--border);
   background: var(--surface-2);
   height: 100svh;
   position: sticky;
   top: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.console-dock {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -1834,4 +1774,137 @@ button.danger:disabled {
 .console-toggle--on {
   border-color: var(--accent);
   color: var(--text-h);
+}
+
+/* Sits above every tab, because the cause is never on the tab you are looking
+   at when the symptom appears. */
+.stale-banner {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--danger, #e5484d);
+  border-radius: var(--radius-sm);
+  background: rgba(229, 72, 77, 0.1);
+}
+
+/* Two years reading as one control, with the dash between them. */
+.year-range {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.year-range input {
+  width: 5rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.year-range span {
+  color: var(--text-dim);
+}
+
+/* ---- importing jobs ---- */
+.import-modal {
+  max-width: 520px;
+}
+
+/* The first section already sits below the header rule. */
+.import-modal .prompt-section:first-child {
+  margin-top: 0;
+}
+
+.import-modal .prompt-section input[type="number"] {
+  width: 6rem;
+}
+
+/* A chip list, as job boards use for skills: the text box is the last item
+   on the line so typing continues where the chips left off. */
+.chip-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.4rem;
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: text;
+}
+
+.chip-input:focus-within {
+  border-color: var(--accent);
+}
+
+.chip-input--disabled {
+  opacity: 0.55;
+}
+
+/* Borderless and transparent: the wrapper is the control, not this box. */
+.chip-input input {
+  flex: 1;
+  min-width: 10rem;
+  border: none;
+  background: none;
+  padding: 0.15rem 0.1rem;
+}
+
+.chip-input input:focus-visible {
+  outline: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.2rem 0.1rem 0.5rem;
+  font-size: 0.8rem;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border, var(--border));
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.chip-remove {
+  border: none;
+  background: none;
+  padding: 0 0.25rem;
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--text-dim);
+}
+
+.chip-remove:hover:not(:disabled) {
+  background: none;
+  color: var(--danger, #e5484d);
+}
+
+.import-progress {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.import-count {
+  font-size: 0.9rem;
+  margin-bottom: 0.4rem;
+}
+
+.import-count strong {
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.import-bar {
+  height: 6px;
+  background: var(--surface-3, var(--border));
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.import-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+  transition: width 0.3s ease;
 }

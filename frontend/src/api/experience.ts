@@ -23,8 +23,10 @@ export interface ExperienceResult {
   deepseekTurns: number;
   search: { mode: "semantic" | "lexical"; model: string | null; detail: string | null };
   /** "fallback" means the AI provider was unavailable and bullets were composed
-   *  directly from database.json rather than generated. */
-  generator: "deepseek" | "fallback";
+   *  directly from database.json rather than generated. "chatgpt" means
+   *  DeepSeek generated the bullets and summary, and a final ChatGPT pass
+   *  then revised them — that revised text is what's actually on the resume. */
+  generator: "deepseek" | "chatgpt" | "fallback";
   extractedAt: string;
 }
 

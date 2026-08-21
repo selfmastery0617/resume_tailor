@@ -7,9 +7,37 @@ export async function fetchJobs(): Promise<Job[]> {
   return response.data;
 }
 
-/** Imports from the source and returns everything stored, not just the new rows. */
-export async function importJobs(): Promise<Job[]> {
-  const response = await axios.post<Job[]>(`${BACKEND_URL}/api/jobs/import`);
+export interface ImportStatus {
+  state: "idle" | "running" | "done" | "cancelled" | "failed";
+  roles: string[];
+  excludeCompanies: string[];
+  limit: number;
+  /** Feed entries looked at, versus how many matched the role filter. */
+  scanned: number;
+  matched: number;
+  startedAt: string;
+  finishedAt: string;
+  error: string | null;
+}
+
+/** Starts an import and returns immediately; poll fetchImportStatus for progress. */
+export async function startImport(options: {
+  roles: string[];
+  limit: number;
+  excludeCompanies: string[];
+}): Promise<ImportStatus> {
+  const response = await axios.post<ImportStatus>(`${BACKEND_URL}/api/jobs/import`, options);
+  return response.data;
+}
+
+export async function fetchImportStatus(): Promise<ImportStatus> {
+  const response = await axios.get<ImportStatus>(`${BACKEND_URL}/api/jobs/import/status`);
+  return response.data;
+}
+
+/** Stops between pages, so rows already found are kept. */
+export async function cancelImport(): Promise<ImportStatus> {
+  const response = await axios.post<ImportStatus>(`${BACKEND_URL}/api/jobs/import/cancel`);
   return response.data;
 }
 

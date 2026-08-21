@@ -382,23 +382,36 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
                       onChange={(e) => updateExperience(entry.id, { location: e.target.value })}
                     />
                   </div>
+                  {/* Years, not months: that is what tailored resumes render,
+                      so accepting "Mar 2021" here would only promise a
+                      precision the output does not keep. */}
                   <div className="field">
-                    <label htmlFor={`exp-start-${entry.id}`}>Start</label>
+                    <label htmlFor={`exp-start-${entry.id}`}>Start year</label>
                     <input
                       id={`exp-start-${entry.id}`}
-                      placeholder="Mar 2021"
+                      inputMode="numeric"
+                      placeholder="2021"
                       value={entry.startDate}
-                      onChange={(e) => updateExperience(entry.id, { startDate: e.target.value })}
+                      onChange={(e) =>
+                        updateExperience(entry.id, {
+                          startDate: e.target.value.replace(/\D/g, "").slice(0, 4),
+                        })
+                      }
                     />
                   </div>
                   <div className="field">
-                    <label htmlFor={`exp-end-${entry.id}`}>End</label>
+                    <label htmlFor={`exp-end-${entry.id}`}>End year</label>
                     <input
                       id={`exp-end-${entry.id}`}
-                      placeholder="Feb 2024"
+                      inputMode="numeric"
+                      placeholder="2024"
                       disabled={entry.current}
                       value={entry.endDate}
-                      onChange={(e) => updateExperience(entry.id, { endDate: e.target.value })}
+                      onChange={(e) =>
+                        updateExperience(entry.id, {
+                          endDate: e.target.value.replace(/\D/g, "").slice(0, 4),
+                        })
+                      }
                     />
                   </div>
                   <div className="field field--inline">

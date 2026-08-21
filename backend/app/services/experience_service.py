@@ -778,6 +778,165 @@ async def _generate_title(
     return "", "none"
 
 
+def _build_revision_message(
+    job1_bullets: Sequence[str],
+    job2_bullets: Sequence[str],
+    summary: str,
+    revision_prompt: str,
+) -> str:
+    """One message: the resume content, then the user's revision instructions,
+    then a fixed, non-editable request for a reply shaped so it can be parsed
+    back out. Mirrors the existing precedent in _extract_skills_and_mission()
+    of appending structured, non-editable content around a user-editable
+    template, rather than substituting placeholders into it.
+    """
+    content = (
+        "Here is my resume content.\n\n"
+        f"Job 1 ({len(job1_bullets)} bullets):\n"
+        + "\n".join(f"- {b}" for b in job1_bullets)
+        + f"\n\nJob 2 ({len(job2_bullets)} bullets):\n"
+        + "\n".join(f"- {b}" for b in job2_bullets)
+        + f"\n\nSummary:\n{summary}\n\n---\n\n"
+    )
+    format_request = (
+        "\n\nReply with the revised version in exactly this format, and "
+        "nothing else (no preamble, no explanation) — keep exactly "
+        f"{len(job1_bullets)} bullets in Job 1 and exactly {len(job2_bullets)} "
+        "in Job 2:\n\nJob 1:\n- revised bullet\n- revised bullet\n...\n\n"
+        "Job 2:\n- revised bullet\n...\n\nSummary:\n..."
+    )
+    return content + revision_prompt + format_request
+
+
+# Tolerant of "Job 1:" / "Job1" / "JOB 1 -", any case, any amount of
+# whitespace between label and colon — the model is asked for this exact
+# shape, but chat models still drift on punctuation.
+_REVISION_SECTION_RE = re.compile(
+    r"job\s*1\s*[:\-]?\s*(?P<job1>.*?)\s*"
+    r"job\s*2\s*[:\-]?\s*(?P<job2>.*?)\s*"
+    r"summary\s*[:\-]?\s*(?P<summary>.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parse_revision_reply(
+    reply: str, job1_count: int, job2_count: int
+) -> tuple[list[str], list[str], str] | None:
+    """Split a revision reply into (job1 bullets, job2 bullets, summary), or
+    None when there isn't enough usable content to trust.
+
+    Locates the three labeled sections, then reuses the existing tolerant
+    cleaners — _parse_bullets() and _clean_summary() — rather than
+    reimplementing bullet/summary cleanup for a second time.
+    """
+    text = (reply or "").replace("**", "")
+    match = _REVISION_SECTION_RE.search(text)
+    if not match:
+        return None
+
+    job1_bullets = _parse_bullets(match.group("job1"), job1_count)
+    job2_bullets = _parse_bullets(match.group("job2"), job2_count)
+    summary = _clean_summary(match.group("summary"))
+
+    # Same acceptance bar _generate_bullets() already uses (line ~437): enough
+    # of what was asked for to trust, not necessarily every last one — there
+    # is no corpus to top up from here, unlike a first-generation bullet.
+    job1_ok = len(job1_bullets) >= max(1, job1_count // 2)
+    job2_ok = len(job2_bullets) >= max(1, job2_count // 2)
+    if not (job1_ok and job2_ok and summary):
+        return None
+
+    return job1_bullets, job2_bullets, summary
+
+
+async def _revise_with_chatgpt(
+    job1_bullets: list[str],
+    job2_bullets: list[str],
+    summary: str,
+) -> tuple[list[str], list[str], str, bool]:
+    """Step 6, the pipeline's last step: a fresh ChatGPT chat revises the
+    bullets and summary DeepSeek just wrote.
+
+    Returns (job1_bullets, job2_bullets, summary, applied) — the originals,
+    unchanged, with applied=False whenever ChatGPT isn't connected, the call
+    fails, or the reply doesn't parse into something usable. Like every other
+    step here, this must never fail the extraction: a missing or broken
+    revision just means the resume keeps DeepSeek's own text. The whole
+    revision is accepted or reverted together — generator is one value for
+    the whole run, so a half-revised resume must not be labeled "chatgpt".
+
+    Must run after _chat_session()'s conversation has fully closed: ChatGPT
+    and DeepSeek share one browser profile, and that block holds the
+    profile's lock for its entire lifetime. Calling this from inside it would
+    wait forever for a lock that only releases once the outer block exits.
+    """
+    if not job1_bullets or not job2_bullets or not summary:
+        return job1_bullets, job2_bullets, summary, False
+
+    from app.services import chatgpt, chatgpt_session, settings_service
+
+    try:
+        status = await chatgpt_session.verify_session()
+    except Exception as exc:  # noqa: BLE001 - a status check must never crash extraction
+        progress.emit(
+            "revision",
+            f"Could not check the ChatGPT session ({type(exc).__name__}) — "
+            "keeping DeepSeek's bullets and summary",
+            level="warn",
+        )
+        return job1_bullets, job2_bullets, summary, False
+
+    if not status.get("connected"):
+        progress.emit(
+            "revision",
+            "ChatGPT is not connected — keeping DeepSeek's bullets and "
+            "summary. Connect ChatGPT in Settings to enable the final "
+            "revision pass.",
+            level="info",
+        )
+        return job1_bullets, job2_bullets, summary, False
+
+    template = (settings_service.get_settings().get("revisionPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_REVISION_PROMPT
+
+    message = _build_revision_message(job1_bullets, job2_bullets, summary, template)
+
+    progress.emit(
+        "revision",
+        "Sending the resume to a new ChatGPT chat for final revision…",
+        level="step",
+    )
+
+    try:
+        reply = await chatgpt.ask(message)
+        parsed = _parse_revision_reply(reply, len(job1_bullets), len(job2_bullets))
+        if parsed is not None:
+            new_job1, new_job2, new_summary = parsed
+            progress.emit(
+                "revision",
+                f"ChatGPT revised {len(new_job1)} + {len(new_job2)} bullets "
+                "and the summary",
+                level="result",
+            )
+            return new_job1, new_job2, new_summary, True
+        progress.emit(
+            "revision",
+            "ChatGPT's revision did not parse into usable bullets and a "
+            "summary — keeping DeepSeek's version",
+            level="warn",
+        )
+    except Exception as exc:  # noqa: BLE001 - provider unavailable or reply timed out
+        progress.emit(
+            "revision",
+            f"ChatGPT revision failed ({type(exc).__name__}) — keeping "
+            "DeepSeek's version",
+            level="warn",
+        )
+
+    return job1_bullets, job2_bullets, summary, False
+
+
 async def extract_experience(
     db: ExperienceDatabase,
     first_company: str,
@@ -858,11 +1017,18 @@ async def extract_experience(
 
         turns = chat.turns if chat else 0
 
+    # Step 6, run only now that DeepSeek's chat has fully closed and released
+    # the shared browser profile — see the docstring on _revise_with_chatgpt.
+    job1_sel.bullets, job2_sel.bullets, summary, revised = await _revise_with_chatgpt(
+        job1_sel.bullets, job2_sel.bullets, summary
+    )
+
     progress.emit(
         "done",
         f"Finished: {len(job1_sel.bullets)} + {len(job2_sel.bullets)} bullets "
         f"({job1_sel.company} → {job2_sel.company})"
-        + (f", summary, title, {turns} DeepSeek turns in 1 session" if turns else ""),
+        + (f", summary, title, {turns} DeepSeek turns in 1 session" if turns else "")
+        + (", revised by ChatGPT" if revised else ""),
         level="result",
         job1={"company": job1_sel.company, "product": job1_sel.product,
               "bullets": len(job1_sel.bullets)},
@@ -890,7 +1056,12 @@ async def extract_experience(
         "search": vector_search.backend(),
         # 'fallback' on either half means the AI provider wasn't used, which the
         # UI surfaces rather than passing template text off as generated.
-        "generator": "deepseek" if gen1 == gen2 == "deepseek" else "fallback",
+        # 'chatgpt' overrides both: it means the text actually on the resume
+        # was revised by ChatGPT in step 6, regardless of which tier produced
+        # the bullets it revised.
+        "generator": (
+            "chatgpt" if revised else ("deepseek" if gen1 == gen2 == "deepseek" else "fallback")
+        ),
         # How many prompts shared the one chat; 0 means DeepSeek was unavailable.
         "deepseekTurns": turns,
         "extractedAt": _now(),

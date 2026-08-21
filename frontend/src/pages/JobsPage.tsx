@@ -21,11 +21,14 @@ import type {
   ValueGetterParams,
 } from "ag-grid-community";
 import {
+  cancelImport,
   createJob,
   deleteJobRows,
+  fetchImportStatus,
   fetchJobs,
-  importJobs,
+  startImport,
   updateJob,
+  type ImportStatus,
 } from "../api/jobs";
 import {
   fetchAllTailoredResumes,
@@ -33,12 +36,13 @@ import {
   type TailoredResume,
 } from "../api/resumes";
 import { extractExperience, fetchAllExperience, type ExperienceResult } from "../api/experience";
-import { fetchSessionStatus } from "../api/deepseek";
+import { fetchSettledSessionStatus } from "../api/deepseek";
 import type { Job } from "../types/job";
 import { InfoModal } from "../components/InfoModal";
 import { UrlCellRenderer } from "../components/UrlCellRenderer";
 import { ResumeCellRenderer, type ResumeGridContext } from "../components/ResumeCellRenderer";
 import { DescriptionActionCell } from "../components/jobs/DescriptionActionCell";
+import { ImportJobsDialog } from "../components/jobs/ImportJobsDialog";
 import { RowDeleteCell, type RowDeleteContext } from "../components/jobs/RowDeleteCell";
 import { StatusCellRenderer, type StatusContext } from "../components/jobs/StatusCell";
 import { useCellRange } from "../components/jobs/useCellRange";
@@ -56,7 +60,9 @@ const gridThemeLight = themeQuartz.withParams({
   headerBackgroundColor: "#f1f3f5",
   headerTextColor: "#16191d",
   rowHoverColor: "rgba(59, 125, 221, 0.07)",
-  selectedRowBackgroundColor: "rgba(59, 125, 221, 0.12)",
+  // Warm, not blue: a ticked row is picked for an action, and must not be
+  // mistaken for the blue cell-range highlight sitting on top of it.
+  selectedRowBackgroundColor: "rgba(229, 72, 77, 0.1)",
   accentColor: "#3b7ddd",
   fontFamily: "inherit",
   fontSize: "13px",
@@ -70,7 +76,7 @@ const gridThemeDark = themeQuartz.withPart(colorSchemeDark).withParams({
   headerBackgroundColor: "#1a1d20",
   headerTextColor: "#e8ebee",
   rowHoverColor: "rgba(91, 147, 240, 0.1)",
-  selectedRowBackgroundColor: "rgba(91, 147, 240, 0.16)",
+  selectedRowBackgroundColor: "rgba(242, 114, 106, 0.14)",
   accentColor: "#5b93f0",
   fontFamily: "inherit",
   fontSize: "13px",
@@ -81,6 +87,7 @@ const gridThemeDark = themeQuartz.withPart(colorSchemeDark).withParams({
 const COLUMN_IDS = [
   "id",
   "date_added",
+  "posted",
   "title",
   "company",
   "url",
@@ -97,19 +104,29 @@ const EDITABLE = new Set(["date_added", "title", "company", "url", "location", "
 const CLEARABLE = ["date_added", "title", "company", "url", "location"];
 
 
-export function JobsPage() {
+interface JobsPageProps {
+  /** Changes when the DeepSeek session may have, so the banner re-checks
+   *  instead of standing on the answer it got when the tab first mounted. */
+  sessionVersion: number;
+}
+
+export function JobsPage({ sessionVersion }: JobsPageProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [experienceResults, setExperienceResults] = useState<Record<string, ExperienceResult>>({});
   const [resumeResults, setResumeResults] = useState<Record<string, TailoredResume>>({});
   const [experienceExtracting, setExperienceExtracting] = useState<Map<string, number>>(new Map());
   const [resumeGenerating, setResumeGenerating] = useState<Map<string, number>>(new Map());
   const [descriptionModalJob, setDescriptionModalJob] = useState<Job | null>(null);
-  const [importing, setImporting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(20);
   const [deepSeekConnected, setDeepSeekConnected] = useState(true);
   const [deletingRows, setDeletingRows] = useState<Set<string>>(new Set());
+  // Ticked checkboxes, kept here so the toolbar can act on them. AG Grid holds
+  // the authoritative state; this mirrors it for rendering.
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const gridApiRef = useRef<GridApi<Job> | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -153,12 +170,32 @@ export function JobsPage() {
         /* same */
       }
       try {
-        setDeepSeekConnected((await fetchSessionStatus()).connected);
+        // An import outlives the page: reloading mid-run should pick the
+        // progress back up rather than look as though nothing is happening.
+        const status = await fetchImportStatus();
+        if (status.state === "running") setImportStatus(status);
       } catch {
-        setDeepSeekConnected(false);
+        /* the toolbar just shows "Import Jobs" */
       }
     })();
   }, [reload]);
+
+  // Separate from the mount effect so signing in from the dock clears the
+  // banner without refetching every job and badge as well.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const status = await fetchSettledSessionStatus();
+        if (alive) setDeepSeekConnected(status.connected);
+      } catch {
+        if (alive) setDeepSeekConnected(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [sessionVersion]);
 
   useEffect(() => {
     gridApiRef.current?.refreshCells({ force: true });
@@ -316,63 +353,79 @@ export function JobsPage() {
     setNotice(`Cleared ${clearable.length * touched} cell${clearable.length * touched === 1 ? "" : "s"}.`);
   }, [range.range, rows, reload]);
 
-  const deleteSelectedRows = useCallback(async () => {
+  /** The one place rows are removed, shared by the toolbar, the row button
+   *  and Ctrl+Delete. Forgets everything derived from them too, so the badges
+   *  do not outlive the rows they belong to. */
+  const removeRows = useCallback(
+    async (ids: string[], prompt: string, describe?: (count: number) => string) => {
+      if (!ids.length || !window.confirm(prompt)) return;
+      setDeletingRows((prev) => new Set([...prev, ...ids]));
+      setError(null);
+      try {
+        const result = await deleteJobRows(ids);
+        const gone = new Set(ids);
+        const forget = <T,>(prev: Record<string, T>) =>
+          Object.fromEntries(Object.entries(prev).filter(([id]) => !gone.has(id)));
+        setExperienceResults(forget);
+        setResumeResults(forget);
+        gridApiRef.current?.deselectAll();
+        range.clear();
+        await reload();
+        setNotice(
+          describe?.(result.count) ??
+            `Deleted ${result.count} row${result.count === 1 ? "" : "s"}.`,
+        );
+      } catch (err) {
+        setError(describeError(err, "Could not delete those rows."));
+      } finally {
+        setDeletingRows((prev) => {
+          const next = new Set(prev);
+          ids.forEach((id) => next.delete(id));
+          return next;
+        });
+      }
+    },
+    [range, reload],
+  );
+
+  const deleteCheckedRows = useCallback(() => {
+    const count = selectedIds.length;
+    return removeRows(
+      selectedIds,
+      `Delete ${count} selected row${count === 1 ? "" : "s"}?\n\n` +
+        "This also removes their extracted experience and resume records. Any " +
+        "PDFs already saved to your output folder stay on disk.",
+    );
+  }, [selectedIds, removeRows]);
+
+  /** Ctrl+Delete. Ticked boxes win over the cell range: checking them is a
+   *  deliberate choice, whereas a range is often left over from a copy. */
+  const deleteRowsFromKeyboard = useCallback(() => {
+    if (selectedIds.length) return deleteCheckedRows();
     if (!range.range) return;
     const ids: string[] = [];
     for (let r = range.range.top; r <= range.range.bottom; r += 1) {
       const job = rows[r];
       if (job) ids.push(job.id);
     }
-    if (!ids.length) return;
-    if (!window.confirm(`Delete ${ids.length} row${ids.length === 1 ? "" : "s"}? This cannot be undone.`)) {
-      return;
-    }
-    try {
-      const result = await deleteJobRows(ids);
-      range.clear();
-      await reload();
-      setNotice(`Deleted ${result.count} row${result.count === 1 ? "" : "s"}.`);
-    } catch (err) {
-      setError(describeError(err, "Could not delete those rows."));
-    }
-  }, [range, rows, reload]);
+    return removeRows(
+      ids,
+      `Delete ${ids.length} row${ids.length === 1 ? "" : "s"}? This cannot be undone.`,
+    );
+  }, [selectedIds, deleteCheckedRows, range.range, rows, removeRows]);
 
   const deleteRow = useCallback(
-    async (job: Job) => {
+    (job: Job) => {
       const label = job.title || job.company || "this row";
-      if (!window.confirm(`Delete "${label}"?
-
-This also removes its extracted experience and resume record. Any PDF already saved to your output folder stays on disk.`)) {
-        return;
-      }
-      setDeletingRows((prev) => new Set(prev).add(job.id));
-      setError(null);
-      try {
-        await deleteJobRows([job.id]);
-        setExperienceResults((prev) => {
-          const next = { ...prev };
-          delete next[job.id];
-          return next;
-        });
-        setResumeResults((prev) => {
-          const next = { ...prev };
-          delete next[job.id];
-          return next;
-        });
-        range.clear();
-        await reload();
-        setNotice(`Deleted "${label}".`);
-      } catch (err) {
-        setError(describeError(err, "Could not delete that row."));
-      } finally {
-        setDeletingRows((prev) => {
-          const next = new Set(prev);
-          next.delete(job.id);
-          return next;
-        });
-      }
+      return removeRows(
+        [job.id],
+        `Delete "${label}"?\n\n` +
+          "This also removes its extracted experience and resume record. Any " +
+          "PDF already saved to your output folder stays on disk.",
+        () => `Deleted "${label}".`,
+      );
     },
-    [range, reload],
+    [removeRows],
   );
 
   // Keyboard lives on the wrapper so it only fires while the table has focus.
@@ -394,13 +447,13 @@ This also removes its extracted experience and resume record. Any PDF already sa
       } else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         // Ctrl+Delete removes rows; Delete alone only empties their cells.
-        if (meta) void deleteSelectedRows();
+        if (meta) void deleteRowsFromKeyboard();
         else void clearSelection();
       } else if (event.key === "Escape") {
         range.clear();
       }
     },
-    [copySelection, pasteIntoSelection, clearSelection, deleteSelectedRows, range],
+    [copySelection, pasteIntoSelection, clearSelection, deleteRowsFromKeyboard, range],
   );
 
   // -- pipeline --------------------------------------------------------------
@@ -478,17 +531,57 @@ This also removes its extracted experience and resume record. Any PDF already sa
     [reload],
   );
 
-  const handleImport = async () => {
-    setImporting(true);
-    setError(null);
+  // Poll while a run is in flight: refresh the status for the counter, and the
+  // rows so the table fills as jobs are found rather than all at the end.
+  useEffect(() => {
+    if (importStatus?.state !== "running") return;
+    let cancelled = false;
+    const id = window.setInterval(async () => {
+      try {
+        const next = await fetchImportStatus();
+        if (cancelled) return;
+        setImportStatus(next);
+        await reload();
+        if (next.state !== "running") {
+          setNotice(
+            next.state === "cancelled"
+              ? `Import cancelled — kept ${next.matched} job${next.matched === 1 ? "" : "s"}.`
+              : next.state === "failed"
+                ? null
+                : `Imported ${next.matched} job${next.matched === 1 ? "" : "s"} from ${next.scanned} scanned.`,
+          );
+          if (next.state === "failed") setError(next.error);
+        }
+      } catch {
+        /* a missed poll is harmless; the next one catches up */
+      }
+    }, 900);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [importStatus?.state, reload]);
+
+  const handleStartImport = useCallback(
+    async (options: { roles: string[]; limit: number; excludeCompanies: string[] }) => {
+      setError(null);
+      setNotice(null);
+      try {
+        setImportStatus(await startImport(options));
+      } catch (err) {
+        setError(describeError(err, "Could not start the import."));
+      }
+    },
+    [],
+  );
+
+  const handleCancelImport = useCallback(async () => {
     try {
-      setJobs(await importJobs());
-    } catch {
-      setError("Failed to import jobs. Check the backend and JOBRIGHT_COOKIE.");
-    } finally {
-      setImporting(false);
+      setImportStatus(await cancelImport());
+    } catch (err) {
+      setError(describeError(err, "Could not cancel the import."));
     }
-  };
+  }, []);
 
   // -- columns ---------------------------------------------------------------
 
@@ -500,12 +593,29 @@ This also removes its extracted experience and resume record. Any PDF already sa
 
     return [
       {
+        colId: "no",
+        headerName: "No",
+        width: 56,
+        editable: false,
+        sortable: false,
+        filter: false,
+        resizable: false,
+        // Row position, not stored data — excluded from COLUMN_IDS the same
+        // way rowDelete is, so it takes no part in range selection or copy.
+        valueGetter: (p: ValueGetterParams<Job>) =>
+          p.node?.rowIndex != null ? p.node.rowIndex + 1 : "",
+      },
+      {
         colId: "id",
         headerName: "ID",
         width: 96,
         editable: false,
+        // Not the first 8 characters: these are uuid7s, which lead with a
+        // millisecond timestamp, so rows created seconds apart (e.g. one
+        // import batch) share the same prefix and looked like duplicate IDs.
+        // The tail is the random part.
         valueGetter: (p: ValueGetterParams<Job>) =>
-          p.data?.id?.slice(0, 8) ?? "",
+          p.data?.id?.slice(-8) ?? "",
         ...selectable("id"),
       },
       {
@@ -515,6 +625,17 @@ This also removes its extracted experience and resume record. Any PDF already sa
         width: 118,
         editable: true,
         ...selectable("date_added"),
+      },
+      {
+        colId: "posted",
+        headerName: "Posted",
+        width: 100,
+        editable: false,
+        // Read-only, unlike Date: this is Jobright's own posting time, not
+        // the user's own tracking date, so it is never something to type into.
+        valueGetter: (p: ValueGetterParams<Job>) => p.data?.publish_time ?? "",
+        valueFormatter: (p) => (p.value ? new Date(p.value).toLocaleDateString() : ""),
+        ...selectable("posted"),
       },
       {
         colId: "title",
@@ -620,15 +741,23 @@ This also removes its extracted experience and resume record. Any PDF already sa
   return (
     <div className="jobs-page">
       <div className="jobs-toolbar">
-        <button className="import-button" onClick={handleImport} disabled={importing}>
-          {importing && <span className="spinner" aria-hidden="true" />}
-          {importing ? "Importing…" : "Import Jobs"}
+        <button className="import-button" onClick={() => setImportOpen(true)}>
+          {importStatus?.state === "running" && <span className="spinner" aria-hidden="true" />}
+          {importStatus?.state === "running"
+            ? `Importing ${importStatus.matched}/${importStatus.limit}…`
+            : "Import Jobs"}
         </button>
         <button type="button" onClick={() => void addRow()}>
           + Add row
         </button>
+        {selectedIds.length > 0 && (
+          <button type="button" className="danger" onClick={() => void deleteCheckedRows()}>
+            Delete {selectedIds.length} selected
+          </button>
+        )}
         <span className="jobs-hint">
-          Drag to select · Ctrl+C / Ctrl+V · Delete clears cells · 🗑 or Ctrl+Delete removes rows
+          Tick rows to delete in bulk · Drag to select cells · Ctrl+C / Ctrl+V ·
+          Delete clears cells · Ctrl+Delete removes rows
         </span>
         <label className="page-size">
           Rows
@@ -674,6 +803,9 @@ This also removes its extracted experience and resume record. Any PDF already sa
           context={gridContext}
           getRowId={(params) => params.data.id}
           onCellValueChanged={onCellValueChanged}
+          onSelectionChanged={(event) =>
+            setSelectedIds(event.api.getSelectedRows().map((job) => job.id))
+          }
           onGridReady={(event) => {
             gridApiRef.current = event.api;
             range.setApi(event.api);
@@ -683,12 +815,29 @@ This also removes its extracted experience and resume record. Any PDF already sa
           suppressPaginationPanel={false}
           stopEditingWhenCellsLoseFocus
           singleClickEdit={false}
-          // The custom range selection owns highlighting; AG Grid's own row
-          // selection would fight it.
-          rowSelection={undefined}
+          // Checkboxes only: clicking a cell must start a range selection, not
+          // tick the row, so the two selections stay independent of each other.
+          rowSelection={{
+            mode: "multiRow",
+            checkboxes: true,
+            headerCheckbox: true,
+            enableClickSelection: false,
+            // The header checkbox covers the page you can see. "All" would tick
+            // rows scrolled out of sight, which is a poor deal for a delete.
+            selectAll: "currentPage",
+          }}
           suppressCellFocus={false}
         />
       </div>
+
+      <ImportJobsDialog
+        open={importOpen}
+        status={importStatus}
+        error={error}
+        onStart={handleStartImport}
+        onCancel={handleCancelImport}
+        onClose={() => setImportOpen(false)}
+      />
 
       <InfoModal
         job={descriptionModalJob}

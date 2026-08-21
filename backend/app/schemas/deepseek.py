@@ -11,14 +11,7 @@ class SessionStatusResponse(BaseModel):
     verified: bool = False
     # True when served from the liveness cache rather than a fresh probe.
     cached: bool = False
-
-
-class LoginStatusResponse(BaseModel):
-    """Progress of the in-app sign-in window.
-
-    status is one of: idle, opening, waiting, success, failed, cancelled.
-    """
-
-    status: str
-    detail: str
-    elapsed_seconds: int = 0
+    # True when a sign-in is holding the browser profile, so "not connected" is
+    # "cannot tell yet" rather than a verdict. The UI re-asks instead of
+    # settling on the amber answer.
+    signingIn: bool = False

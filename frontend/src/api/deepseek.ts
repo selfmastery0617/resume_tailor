@@ -1,23 +1,8 @@
 import axios from "axios";
 import { BACKEND_URL } from "../config";
+import { settled, type SessionStatus } from "./providerSession";
 
-export interface SessionStatus {
-  connected: boolean;
-  detail: string;
-  /** True when the backend actually loaded the provider to check, rather than
-   *  only inspecting the stored session file. */
-  verified?: boolean;
-  cached?: boolean;
-}
-
-/** Mirrors the backend's LoginStatus literal. */
-export type LoginState = "idle" | "opening" | "waiting" | "success" | "failed" | "cancelled";
-
-export interface LoginStatus {
-  status: LoginState;
-  detail: string;
-  elapsed_seconds: number;
-}
+export type { SessionStatus };
 
 export async function fetchSessionStatus(force = false): Promise<SessionStatus> {
   const response = await axios.get<SessionStatus>(`${BACKEND_URL}/api/deepseek/session`, {
@@ -28,13 +13,23 @@ export async function fetchSessionStatus(force = false): Promise<SessionStatus> 
   return response.data;
 }
 
-/** Opens the sign-in window. Returns immediately — poll fetchLoginStatus(). */
-export async function startLogin(): Promise<LoginStatus> {
-  const response = await axios.post<LoginStatus>(`${BACKEND_URL}/api/deepseek/login`);
-  return response.data;
+/** Verification that waits out a sign-in holding the browser profile.
+ *
+ *  Closing the sign-in dock stops the remote session asynchronously, so a check
+ *  fired straight afterwards can still land while it is shutting down. The
+ *  backend answers "signing in" rather than guessing, and without this retry a
+ *  perfectly good session would sit there showing as disconnected.
+ */
+export function fetchSettledSessionStatus(force = false): Promise<SessionStatus> {
+  return settled(() => fetchSessionStatus(force));
 }
 
-export async function fetchLoginStatus(): Promise<LoginStatus> {
-  const response = await axios.get<LoginStatus>(`${BACKEND_URL}/api/deepseek/login/status`);
+/** Forgets the stored session on this machine.
+ *
+ *  Signs out of the app, not out of DeepSeek — the account is untouched and any
+ *  session in your own browser keeps working.
+ */
+export async function signOutDeepSeek(): Promise<SessionStatus> {
+  const response = await axios.post<SessionStatus>(`${BACKEND_URL}/api/deepseek/sign-out`);
   return response.data;
 }

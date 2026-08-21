@@ -3,7 +3,7 @@
 session_status() in session.py only inspects the file — it reports "connected"
 whenever cookies and a userToken are present. But those expire, so the UI could
 show green while every extraction silently fell back. This actually loads
-chat.deepseek.com with the stored session and looks for the composer.
+chat.deepseek.com with the shared profile and looks for the composer.
 
 The check costs a headless browser launch (~5-8s), so results are cached. The
 cache is invalidated the moment a sign-in succeeds, so the status flips
@@ -11,15 +11,26 @@ immediately rather than after the TTL.
 """
 
 import asyncio
+import re
 import time
 from typing import Any
 
 from .errors import DeepSeekAuthError
 from .session import DEEPSEEK_ORIGIN, USER_TOKEN_KEY, build_storage_state
 
+# Matches an open tab against chat.deepseek.com, for the live shared-window
+# check in verify_session().
+_TAB_PATTERN = re.compile(r"deepseek\.com")
+
 # Long enough that opening Settings repeatedly doesn't launch a browser each
 # time; short enough that an expiry is noticed within a working session.
 CACHE_TTL_SECONDS = 300.0
+
+# How long a probe or sign-out waits for the profile lock before reporting
+# busy instead of hanging. A stuck separate-window sign-in, a crashed browser
+# that never released its lock, or an extraction in progress are all real
+# things that can hold this — the honest answer is "busy", not a frozen card.
+PROFILE_LOCK_TIMEOUT_S = 6.0
 
 PROBE_TIMEOUT_MS = 25_000
 # How long to wait, after the document loads, for either the composer to render
@@ -71,11 +82,15 @@ def _structural_status() -> dict[str, Any] | None:
     return None
 
 
+def _is_signed_in(page: Any) -> bool:
+    return page.locator(CHAT_INPUT_SELECTOR).count() > 0
+
+
 def _probe_sync() -> dict[str, Any]:
     """Load DeepSeek in the persistent profile and report whether it still works."""
     from app.services.deepseek import browser as browser_mod
 
-    with browser_mod.browser_context(headless=True) as context:
+    with browser_mod.browser_context(headless=True, lock_timeout=PROFILE_LOCK_TIMEOUT_S) as context:
         page = browser_mod.first_page(context)
         # domcontentloaded, not the default "load": DeepSeek keeps long-lived
         # connections open, so waiting for every resource to settle times out
@@ -88,7 +103,7 @@ def _probe_sync() -> dict[str, Any]:
         while time.monotonic() < deadline:
             if any(marker in page.url for marker in LOGIN_URL_MARKERS):
                 break
-            if page.locator(CHAT_INPUT_SELECTOR).count() > 0:
+            if _is_signed_in(page):
                 break
             page.wait_for_timeout(400)
 
@@ -98,7 +113,7 @@ def _probe_sync() -> dict[str, Any]:
                 "detail": "The DeepSeek session has expired. Sign in again.",
                 "verified": True,
             }
-        if page.locator(CHAT_INPUT_SELECTOR).count() == 0:
+        if not _is_signed_in(page):
             return {
                 "connected": False,
                 "detail": (
@@ -116,22 +131,93 @@ def invalidate() -> None:
     _cache["result"] = None
 
 
+class SignOutBlocked(RuntimeError):
+    """The profile is in use, so it cannot be deleted right now."""
+
+
+def sign_out() -> dict[str, Any]:
+    """Forget the stored DeepSeek session on this machine.
+
+    Deletes the browser profile and the storage-state snapshot — both, because
+    either one alone would let the next check report a session that the other
+    half no longer backs.
+
+    This signs out of the app, not out of DeepSeek: the account is untouched and
+    any session in the user's own browser keeps working.
+    """
+    import re
+
+    from app.services.deepseek import browser as browser_mod
+    from app.services.deepseek.session import DEFAULT_SESSION_PATH
+
+    try:
+        browser_mod.clear_origin_cookies(
+            re.compile(r"deepseek"), lock_timeout=PROFILE_LOCK_TIMEOUT_S
+        )
+    except browser_mod.ProfileBusy as exc:
+        raise SignOutBlocked(str(exc)) from exc
+
+    # The legacy snapshot file predates the shared profile; delete it too so it
+    # cannot be read as a stale fallback session by anything that still checks it.
+    DEFAULT_SESSION_PATH.unlink(missing_ok=True)
+    invalidate()
+    return {
+        "connected": False,
+        "detail": "Signed out. Sign in again when you need DeepSeek.",
+        "verified": True,
+        "cached": False,
+        "signingIn": False,
+    }
+
+
 async def verify_session(force: bool = False) -> dict[str, Any]:
     """Whether the stored session actually works right now.
 
     `verified: False` means the answer came from file inspection alone (either
     there is no session, or a cached live result was unavailable).
     """
-    # An embedded sign-in holds the profile lock; probing now would block until
-    # it finishes, hanging the Settings page.
-    from app.services.deepseek import embedded_login
+    # If the shared sign-in window is open with a DeepSeek tab, read it
+    # directly rather than launching a second, competing instance against the
+    # same profile — that would just queue behind the lock the open window
+    # already holds, so a sign-in the user just finished would never be seen
+    # until they closed the window.
+    from app.services.shared_browser import shared_browser
 
-    if embedded_login.is_active():
+    live = shared_browser.check_page(_TAB_PATTERN, _is_signed_in)
+    if live is True:
+        invalidate()
+        return {
+            "connected": True,
+            "detail": "Signed in to DeepSeek.",
+            "verified": True,
+            "cached": False,
+            "signingIn": False,
+        }
+    if live is False:
         return {
             "connected": False,
-            "detail": "Sign-in in progress…",
+            "detail": "Waiting for you to sign in…",
+            "verified": True,
+            "cached": False,
+            "signingIn": True,
+        }
+
+    # The window is open, just not on a DeepSeek tab -- launching a second
+    # instance against the same profile would only queue behind the lock the
+    # open window already holds until it closes, which is what turned "Not
+    # connected" into a several-second "browser is in use" error while a
+    # different provider's sign-in was up. Answer from the last probe instead
+    # of waiting on a lock that will not free up until that window closes.
+    if shared_browser.is_open():
+        cached = _cache["result"]
+        if cached is not None:
+            return {**cached, "cached": True, "signingIn": False}
+        return {
+            "connected": False,
+            "detail": "Checking will resume once the sign-in window is free.",
             "verified": False,
             "cached": False,
+            "signingIn": False,
         }
 
     structural = _structural_status()
@@ -146,8 +232,22 @@ async def verify_session(force: bool = False) -> dict[str, Any]:
         if cached is not None and fresh and not force:
             return {**cached, "cached": True}
 
+        from app.services.deepseek import browser as browser_mod
+
         try:
             result = await asyncio.to_thread(_probe_sync)
+        except browser_mod.ProfileBusy as exc:
+            # Transient, not a verdict about the session — the shared sign-in
+            # window or an extraction could be holding the profile. Caching
+            # this would show "busy" for CACHE_TTL_SECONDS after the
+            # contention clears, so it deliberately skips the cache.
+            return {
+                "connected": False,
+                "detail": str(exc),
+                "verified": False,
+                "cached": False,
+                "signingIn": True,
+            }
         except Exception as exc:  # noqa: BLE001 - probe must never 500 the page
             # Playwright errors are multi-line traces; surfacing one verbatim in
             # the UI tells the user nothing they can act on.

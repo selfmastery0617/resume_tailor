@@ -97,7 +97,9 @@ export function useCellRange(gridRef: React.RefObject<HTMLDivElement | null>, op
       const target = event.target as HTMLElement;
       if (isInteractive?.(target)) return;
       const cell = cellFromEvent(event);
-      if (!cell) return;
+      // Columns outside the list hold controls, not data — the checkbox and
+      // the delete button. They take no part in a range.
+      if (!cell || !columnIds.includes(cell.colId)) return;
       dragging.current = true;
       // Shift extends the existing range, matching a spreadsheet.
       if (event.shiftKey && anchor) setFocus(cell);
@@ -107,7 +109,9 @@ export function useCellRange(gridRef: React.RefObject<HTMLDivElement | null>, op
     const onMouseOver = (event: MouseEvent) => {
       if (!dragging.current) return;
       const cell = cellFromEvent(event);
-      if (cell) setFocus(cell);
+      // Dragging out over a control column holds the range where it was rather
+      // than collapsing it, so passing over one on the way back is harmless.
+      if (cell && columnIds.includes(cell.colId)) setFocus(cell);
     };
 
     // On window, not the grid: a drag that ends outside it must still finish.
@@ -123,7 +127,7 @@ export function useCellRange(gridRef: React.RefObject<HTMLDivElement | null>, op
       host.removeEventListener("mouseover", onMouseOver);
       window.removeEventListener("mouseup", onMouseUp);
     };
-  }, [gridRef, anchor, select, isInteractive]);
+  }, [gridRef, anchor, select, isInteractive, columnIds]);
 
   // Repaint the highlight. AG Grid owns the cell DOM, so the class has to come
   // from a cellClass callback and be refreshed rather than set directly.

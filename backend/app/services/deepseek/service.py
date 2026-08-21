@@ -38,6 +38,12 @@ LOGIN_URL_MARKERS = ("/sign_in", "/login")
 
 # --- Timing ----------------------------------------------------------------
 PAGE_LOAD_TIMEOUT_MS = 45_000
+# How long to poll for the chat input (or a redirect to sign-in) before
+# giving up. A launch against the shared profile can take noticeably longer
+# to render right after another provider's browser session just closed
+# against the same profile directory than it does in isolation.
+LOGIN_CHECK_TIMEOUT_S = 15.0
+LOGIN_CHECK_POLL_S = 0.5
 REPLY_START_TIMEOUT_S = 60.0
 REPLY_TOTAL_TIMEOUT_S = 180.0
 STABILITY_POLL_INTERVAL_S = 0.5
@@ -142,21 +148,32 @@ class DeepSeekService:
 
     @staticmethod
     def _assert_logged_in(page: Any) -> None:
-        """Fail fast with a clear message when the session has expired."""
-        page.wait_for_timeout(1_500)  # allow client-side auth redirect
+        """Fail fast with a clear message when the session has expired.
 
-        if any(marker in page.url for marker in LOGIN_URL_MARKERS):
-            raise DeepSeekAuthError(
-                "DeepSeek rejected the saved session and redirected to sign-in. "
-                "Open Settings and select Connect DeepSeek to sign in again."
-            )
-
-        if page.locator(CHAT_INPUT_SELECTOR).count() == 0:
-            raise DeepSeekAuthError(
-                "DeepSeek chat input not found. The session may be invalid, or a "
-                "Cloudflare check may be blocking headless access. Reconnect from "
-                "Settings; if it persists, set DEEPSEEK_HEADLESS=false in backend/.env."
-            )
+        Polls rather than checking once after a fixed pause: caught this
+        misreading "hasn't finished loading yet" as "not signed in" when a
+        launch against the shared profile followed closely behind another
+        provider's browser session closing (verified while adding the
+        ChatGPT revision step, which launches its own browser right after
+        this one's DeepSeekConversation closes — see chatgpt.py's
+        assert_logged_in for the same fix).
+        """
+        deadline = time.monotonic() + LOGIN_CHECK_TIMEOUT_S
+        while True:
+            if any(marker in page.url for marker in LOGIN_URL_MARKERS):
+                raise DeepSeekAuthError(
+                    "DeepSeek rejected the saved session and redirected to sign-in. "
+                    "Open Settings and select Connect DeepSeek to sign in again."
+                )
+            if page.locator(CHAT_INPUT_SELECTOR).count() > 0:
+                return
+            if time.monotonic() > deadline:
+                raise DeepSeekAuthError(
+                    "DeepSeek chat input not found. The session may be invalid, or a "
+                    "Cloudflare check may be blocking headless access. Reconnect from "
+                    "Settings; if it persists, set DEEPSEEK_HEADLESS=false in backend/.env."
+                )
+            page.wait_for_timeout(int(LOGIN_CHECK_POLL_S * 1000))
 
     @staticmethod
     def _send_message(page: Any, message: str) -> None:

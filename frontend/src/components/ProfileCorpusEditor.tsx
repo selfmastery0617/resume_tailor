@@ -23,6 +23,8 @@ export function ProfileCorpusEditor({ profileId, profileName }: ProfileCorpusEdi
   const [info, setInfo] = useState<DatabaseInfo | null>(null);
   const [text, setText] = useState("");
   const [firstCompany, setFirstCompany] = useState("");
+  const [startYear, setStartYear] = useState("");
+  const [endYear, setEndYear] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -41,7 +43,10 @@ export function ProfileCorpusEditor({ profileId, profileName }: ProfileCorpusEdi
       setError("Could not load this profile's database.json.");
     }
     try {
-      setFirstCompany((await fetchSettings()).firstCompany);
+      const loaded = await fetchSettings();
+      setFirstCompany(loaded.firstCompany);
+      setStartYear(loaded.firstCompanyStartYear);
+      setEndYear(loaded.firstCompanyEndYear);
     } catch {
       /* the dropdown just starts empty */
     }
@@ -106,6 +111,23 @@ export function ProfileCorpusEditor({ profileId, profileName }: ProfileCorpusEdi
     }
   };
 
+  /** Years are saved on blur, not per keystroke: "201" is not a year, and
+   *  saving it would bounce a validation error back on every character. */
+  const handleYear = async (
+    key: "firstCompanyStartYear" | "firstCompanyEndYear",
+    value: string,
+  ) => {
+    setError(null);
+    try {
+      await saveSettings({ [key]: value });
+      setNotice(value ? `Saved ${value}.` : "Year cleared.");
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: { message?: string } } } })
+        .response?.data?.detail?.message;
+      setError(detail ?? "Could not save that year.");
+    }
+  };
+
   if (!profileId) return null;
 
   const companies = info?.companies ?? [];
@@ -151,6 +173,45 @@ export function ProfileCorpusEditor({ profileId, profileName }: ProfileCorpusEdi
           No first company selected — extraction will refuse to run.
         </p>
       )}
+
+      <div className="style-row" style={{ maxWidth: 520 }}>
+        <label htmlFor="first-company-start" className="style-label">
+          First company years
+        </label>
+        <div className="style-control year-range">
+          <input
+            id="first-company-start"
+            type="text"
+            inputMode="numeric"
+            placeholder="2016"
+            value={startYear}
+            onChange={(event) => setStartYear(event.target.value.replace(/\D/g, "").slice(0, 4))}
+            onBlur={() => void handleYear("firstCompanyStartYear", startYear)}
+          />
+          <span aria-hidden="true">–</span>
+          <input
+            id="first-company-end"
+            type="text"
+            inputMode="numeric"
+            placeholder="2019"
+            value={endYear}
+            onChange={(event) => setEndYear(event.target.value.replace(/\D/g, "").slice(0, 4))}
+            onBlur={() => void handleYear("firstCompanyEndYear", endYear)}
+          />
+        </div>
+      </div>
+      <p className="notice">
+        Years only — resumes here never show months. The later role picks up
+        where this one ends, so these two numbers date the whole resume:{" "}
+        {startYear && endYear ? (
+          <strong>
+            {firstCompany || "First company"} {startYear}–{endYear}, then the
+            recent role {endYear}–Present
+          </strong>
+        ) : (
+          <>set both and the recent role becomes “end year – Present”.</>
+        )}
+      </p>
 
       <div className="prompt-section">
         <label htmlFor="database-json">database.json</label>

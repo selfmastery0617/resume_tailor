@@ -5,21 +5,22 @@
  */
 
 import { useEffect, useState } from "react";
-import { fetchLoginStatus, fetchSessionStatus, startLogin } from "../api/deepseek";
+import { fetchSettledSessionStatus, signOutDeepSeek } from "../api/deepseek";
 import {
-  fetchChatGptLoginStatus,
-  fetchChatGptSession,
   fetchSettings,
   saveSettings,
   selectFolder,
-  startChatGptLogin,
   type AppSettings,
   type FolderCheck,
   type GenerationModel,
 } from "../api/settings";
+import {
+  fetchSettledJobrightSession,
+  signOutJobright,
+} from "../api/jobright";
+import { fetchSettledChatGptSession, signOutChatGpt } from "../api/chatgpt";
 import { fetchProfiles } from "../api/templates";
 import type { Profile } from "../resume/types";
-import { DeepSeekLoginPanel } from "../components/DeepSeekLoginPanel";
 import { ProviderConnect } from "../components/ProviderConnect";
 
 /** Mirrors TAILORING_PLACEHOLDERS in backend settings_service.py. */
@@ -62,14 +63,17 @@ function PlaceholderList({ tokens }: { tokens: readonly string[] }) {
   );
 }
 
-export function SettingsPage() {
+interface SettingsPageProps {
+  /** Told after a sign-in or sign-out here, so the sidebar dots and the Jobs
+   *  banner re-check too — each card already tracks its own status. */
+  onProviderSignedOut: () => void;
+}
+
+export function SettingsPage({ onProviderSignedOut }: SettingsPageProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [folderCheck, setFolderCheck] = useState<FolderCheck | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [showDeepSeekLogin, setShowDeepSeekLogin] = useState(false);
-  // Bumped after a successful sign-in to make the provider cards re-check.
-  const [providerRefresh, setProviderRefresh] = useState(0);
   const [saving, setSaving] = useState(false);
   const [selectingFolder, setSelectingFolder] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -182,43 +186,45 @@ export function SettingsPage() {
   return (
     <div className="settings-page">
       <section className="settings-section">
-        <h2>AI connections</h2>
+        <h2>Connections</h2>
         <p className="notice">
-          Sign in through your browser — no API keys needed. Sessions expire
-          periodically; reconnect here when they do.
+          Sign in through your browser — no API keys, and nothing to copy out
+          of devtools. Each button opens a tab (in one shared window, if more
+          than one is open at once) — sign in there, then come back. Sessions
+          expire periodically; reconnect here when they do.
         </p>
         <div className="provider-grid">
           <ProviderConnect
-            key={`deepseek-${providerRefresh}`}
+            key="deepseek"
+            provider="deepseek"
             label="DeepSeek"
             description="Used for skill extraction and, optionally, resume tailoring."
-            fetchSession={fetchSessionStatus}
-            startLogin={startLogin}
-            fetchLoginStatus={fetchLoginStatus}
-            // Sign in inside the page instead of opening a separate window.
-            onConnectClick={() => setShowDeepSeekLogin(true)}
+            fetchSession={fetchSettledSessionStatus}
+            signOut={signOutDeepSeek}
+            onSignedIn={onProviderSignedOut}
+            onSignedOut={onProviderSignedOut}
           />
           <ProviderConnect
+            key="jobright"
+            provider="jobright"
+            label="Jobright"
+            description="The job feed that Import Jobs pulls from."
+            fetchSession={fetchSettledJobrightSession}
+            signOut={signOutJobright}
+            onSignedIn={onProviderSignedOut}
+            onSignedOut={onProviderSignedOut}
+          />
+          <ProviderConnect
+            key="chatgpt"
+            provider="chatgpt"
             label="ChatGPT"
             description="Alternative model for generating tailored resumes and cover letters."
-            fetchSession={fetchChatGptSession}
-            startLogin={startChatGptLogin}
-            fetchLoginStatus={fetchChatGptLoginStatus}
+            fetchSession={fetchSettledChatGptSession}
+            signOut={signOutChatGpt}
+            onSignedIn={onProviderSignedOut}
+            onSignedOut={onProviderSignedOut}
           />
         </div>
-
-        {showDeepSeekLogin && (
-          <DeepSeekLoginPanel
-            onSignedIn={() => {
-              // Remount the card so it re-verifies and turns green.
-              setProviderRefresh((n) => n + 1);
-            }}
-            onClose={() => {
-              setShowDeepSeekLogin(false);
-              setProviderRefresh((n) => n + 1);
-            }}
-          />
-        )}
 
         <div className="style-row" style={{ maxWidth: 420 }}>
           <label htmlFor="generation-model" className="style-label">
@@ -303,8 +309,10 @@ export function SettingsPage() {
         <p className="notice">
           The first four run as turns in a{" "}
           <strong>single DeepSeek chat</strong> for one job, so each still has
-          the earlier answers in context. The last is separate — it builds a
-          profile's career database rather than tailoring a resume.
+          the earlier answers in context. The fifth runs once more, in a fresh{" "}
+          <strong>ChatGPT chat</strong>, to revise the bullets and summary
+          DeepSeek just wrote. The last is separate — it builds a profile's
+          career database rather than tailoring a resume.
         </p>
         <div className="prompt-section">
           <label htmlFor="settings-skills-prompt">1. Skill extraction prompt</label>
@@ -387,6 +395,25 @@ export function SettingsPage() {
               — the model won't receive that context.
             </p>
           )}
+        </div>
+
+        <div className="prompt-section">
+          <label htmlFor="settings-revision-prompt">5. Final revision prompt</label>
+          <p className="notice">
+            Runs last, in a new ChatGPT chat — the bullets and summary just
+            written are handed over first, then this prompt asks ChatGPT to
+            revise them. Requires ChatGPT to be connected above; if it isn't,
+            this step is skipped and DeepSeek's own bullets and summary are
+            used instead. No placeholders — it applies style rules to the
+            resume ChatGPT was just given, not to individual fields.
+          </p>
+          <textarea
+            id="settings-revision-prompt"
+            className="prompt-textarea"
+            rows={10}
+            value={draft.revisionPrompt}
+            onChange={(event) => update("revisionPrompt", event.target.value)}
+          />
         </div>
 
         <div className="prompt-section">

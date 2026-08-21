@@ -10,7 +10,6 @@ from app.services.deepseek import (
     DeepSeekService,
     DeepSeekTimeoutError,
 )
-from app.services.jobright_client import JobrightClient
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -28,16 +27,50 @@ def list_jobs():
     return job_store.list_jobs()
 
 
-@router.post("/import", response_model=list[StoredJob])
-async def import_jobs():
-    """Fetch from the source and store. Returns everything held, not just the new.
+class ImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    Rows already marked applied keep their details — re-importing must not
-    rewrite the listing a submitted application was based on.
+    # Free text from the dialog: "Senior Data Engineer, Data Engineer".
+    roles: list[str] = []
+    limit: int = 10
+    excludeCompanies: list[str] = []
+
+
+@router.post("/import")
+async def start_import(payload: ImportRequest):
+    """Begin an import and return immediately.
+
+    The feed is paginated and a run takes a while, so this starts a background
+    task; the dialog polls /import/status for progress and the table refreshes
+    as rows are stored.
+
+    Async on purpose: a sync path operation runs in a worker thread, where
+    asyncio.create_task has no loop to attach the run to.
     """
-    client = JobrightClient()
-    listings = await client.fetch_jobs()
-    return job_store.upsert_many(listings)
+    from app.services.job_import import ImportBusy, importer
+
+    try:
+        return importer.start(payload.roles, payload.limit, payload.excludeCompanies)
+    except ImportBusy as exc:
+        raise HTTPException(
+            status_code=409, detail={"code": "IMPORT_RUNNING", "message": str(exc)}
+        ) from exc
+
+
+@router.get("/import/status")
+def import_status():
+    """Progress for the dialog: how many scanned, how many matched, and state."""
+    from app.services.job_import import importer
+
+    return importer.snapshot()
+
+
+@router.post("/import/cancel")
+def cancel_import():
+    """Stop the run. It stops between pages, so rows already found are kept."""
+    from app.services.job_import import importer
+
+    return importer.cancel()
 
 
 class JobPatch(BaseModel):

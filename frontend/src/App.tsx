@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { JobsPage } from "./pages/JobsPage";
 import { TemplatesPage } from "./pages/TemplatesPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -6,16 +6,77 @@ import { ProfilePage } from "./pages/ProfilePage";
 import { TemplateBuilderPage } from "./pages/TemplateBuilderPage";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ProgressConsole } from "./components/ProgressConsole";
+import { fetchSettledSessionStatus } from "./api/deepseek";
+import { fetchSettledJobrightSession } from "./api/jobright";
+import { fetchSettledChatGptSession } from "./api/chatgpt";
+import { fetchHealth } from "./api/health";
 import "./App.css";
 
-/** The shell: navigation, theme, and the progress console. Each tab owns its
- *  own data — the jobs table moved to JobsPage when it became a spreadsheet. */
+/** The shell: navigation, theme, and the console dock. Each tab owns its own
+ *  data — the jobs table moved to JobsPage when it became a spreadsheet —
+ *  but provider connection state is shared, because signing in on Settings
+ *  has to be visible in the sidebar and on the Jobs banner at once. */
 function App() {
   const [showConsole, setShowConsole] = useState(false);
+  // Bumped whenever a provider session may have changed (a sign-in or
+  // sign-out on Settings). Everything that displays connection state watches
+  // this instead of polling on its own schedule, so no view is left showing a
+  // stale answer.
+  const [sessionVersion, setSessionVersion] = useState(0);
+  // null while the first check is in flight — "unknown" is not "disconnected".
+  const [deepSeekOk, setDeepSeekOk] = useState<boolean | null>(null);
+  const [jobrightOk, setJobrightOk] = useState<boolean | null>(null);
+  const [chatGptOk, setChatGptOk] = useState<boolean | null>(null);
   const [activeTab, setActiveTab] = useState<
     "jobs" | "profile" | "templates" | "builder" | "settings"
   >("jobs");
+  // The backend is serving code older than the files on disk. Silent until it
+  // happens, and it has caused several rounds of "the feature does nothing".
+  const [staleBackend, setStaleBackend] = useState(false);
 
+  useEffect(() => {
+    let alive = true;
+    const check = async () => {
+      try {
+        const health = await fetchHealth();
+        if (alive) setStaleBackend(health.stale);
+      } catch {
+        /* unreachable is a different problem, and every page says so already */
+      }
+    };
+    void check();
+    // Slow: this only changes when a file is saved or the server restarts.
+    const id = window.setInterval(check, 20000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const refreshSession = useCallback(() => setSessionVersion((v) => v + 1), []);
+
+  useEffect(() => {
+    let alive = true;
+    const check = async (
+      fetch: () => Promise<{ connected: boolean }>,
+      set: (value: boolean) => void,
+    ) => {
+      try {
+        const status = await fetch();
+        if (alive) set(status.connected);
+      } catch {
+        if (alive) set(false);
+      }
+    };
+    // In parallel: DeepSeek's check launches a browser and takes seconds, and
+    // queueing Jobright behind it would leave its dot grey for no reason.
+    void check(fetchSettledSessionStatus, setDeepSeekOk);
+    void check(fetchSettledJobrightSession, setJobrightOk);
+    void check(fetchSettledChatGptSession, setChatGptOk);
+    return () => {
+      alive = false;
+    };
+  }, [sessionVersion]);
 
   const NAV: { id: typeof activeTab; label: string; icon: string }[] = [
     { id: "jobs", label: "Jobs", icon: "📋" },
@@ -24,6 +85,31 @@ function App() {
     { id: "builder", label: "Builder", icon: "🧩" },
     { id: "settings", label: "Settings", icon: "⚙️" },
   ];
+
+  /** A read-only status dot per provider — sign-in itself happens from its
+   *  card on Settings, so clicking one just takes you there. */
+  const providerStatus = (label: string, connected: boolean | null) => (
+    <button
+      type="button"
+      className="console-toggle"
+      onClick={() => setActiveTab("settings")}
+      title={
+        connected === null
+          ? `Checking the ${label} session…`
+          : connected
+            ? `${label} is connected`
+            : `${label} is not connected — sign in on Settings`
+      }
+    >
+      <span
+        className={`deepseek-dot deepseek-dot--${
+          connected === null ? "checking" : connected ? "ok" : "warn"
+        }`}
+        aria-hidden="true"
+      />
+      <span>{label}</span>
+    </button>
+  );
 
   return (
     <div className="app-shell">
@@ -50,6 +136,9 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
+          {providerStatus("DeepSeek", deepSeekOk)}
+          {providerStatus("Jobright", jobrightOk)}
+          {providerStatus("ChatGPT", chatGptOk)}
           <button
             type="button"
             className={`console-toggle${showConsole ? " console-toggle--on" : ""}`}
@@ -64,6 +153,12 @@ function App() {
       </aside>
 
       <main className="app-main">
+      {staleBackend && (
+        <p className="error stale-banner">
+          The backend is running code older than your source files — restart it,
+          or anything added since it started will silently do nothing.
+        </p>
+      )}
       {/* Kept mounted rather than conditionally rendered: unmounting would
           silently discard unsaved style edits when switching tabs. */}
       <div hidden={activeTab !== "profile"}>
@@ -79,15 +174,19 @@ function App() {
       </div>
 
       <div hidden={activeTab !== "settings"}>
-        <SettingsPage />
+        <SettingsPage onProviderSignedOut={refreshSession} />
       </div>
 
       <div hidden={activeTab !== "jobs"}>
-        <JobsPage />
+        <JobsPage sessionVersion={sessionVersion} />
       </div>
       </main>
 
-      {showConsole && <ProgressConsole onClose={() => setShowConsole(false)} />}
+      {showConsole && (
+        <div className="dock-column">
+          <ProgressConsole onClose={() => setShowConsole(false)} />
+        </div>
+      )}
     </div>
   );
 }

@@ -16,7 +16,8 @@ setting, falling back to the user's default.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 from urllib.parse import urlparse
 from uuid import UUID
@@ -117,6 +118,54 @@ def _as_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+_RELATIVE_PUBLISH_RE = re.compile(
+    r"(?P<n>\d+)\s*(?P<unit>hour|day|week|month|year)s?\s*ago", re.IGNORECASE
+)
+
+
+def _parse_publish_time(listing: JobListing, now: datetime) -> datetime | None:
+    """When Jobright says a listing was posted, as a best-effort absolute time.
+
+    Jobright's own `publishTime` is undocumented and not reliably present (the
+    mock fixtures only ever set the relative description), so the description
+    — "2 days ago", "6 hours ago" — is the field actually trusted. `publish_time`
+    is tried first in case it turns out to be an epoch or ISO value; either way
+    a listing whose posting time can't be read just leaves the column empty
+    rather than guessing, same as every other best-effort field here.
+    """
+    raw = (listing.publish_time or "").strip()
+    if raw:
+        try:
+            return datetime.fromtimestamp(float(raw) / (1000 if len(raw) >= 13 else 1), tz=timezone.utc)
+        except (ValueError, OSError):
+            pass
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
+    text = (listing.publish_time_desc or "").strip().lower()
+    if not text:
+        return None
+    if text in ("just now", "today"):
+        return now
+    if text == "yesterday":
+        return now - timedelta(days=1)
+    match = _RELATIVE_PUBLISH_RE.search(text)
+    if not match:
+        return None
+    n = int(match.group("n"))
+    unit = match.group("unit")
+    delta = {
+        "hour": timedelta(hours=n),
+        "day": timedelta(days=n),
+        "week": timedelta(weeks=n),
+        "month": timedelta(days=n * 30),
+        "year": timedelta(days=n * 365),
+    }[unit]
+    return now - delta
+
+
 def _as_number(value: Any) -> float | None:
     """Jobright sends the match score as a string like '85' or '85%'."""
     if value in (None, ""):
@@ -187,6 +236,7 @@ def upsert_many(listings: Iterable[JobListing], source: str = "jobright") -> lis
                 work_model=_as_text(listing.work_model),
                 match_score=_as_number(listing.match_score),
                 skills=_as_text(listing.skills),
+                published_at=_parse_publish_time(listing, now),
                 first_seen_at=now,
                 last_seen_at=now,
             )
