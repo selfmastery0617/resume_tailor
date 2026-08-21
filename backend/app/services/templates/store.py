@@ -19,14 +19,39 @@ from app.bootstrap import current_org_id, current_user_id
 from app.db import get_db
 from app.ids import uuid7
 from app.models import templates, templates_versions
-from app.schemas.layout import LayoutError, default_layout, validate_layout
-from app.schemas.style import validate_overrides
+from app.schemas.layout import LayoutError, default_layout, dump_layout, validate_layout
+from app.schemas.style import ResumeStyle, validate_overrides
 from app.schemas.template import TemplateDefinition
 
 LAYOUT_RENDERER_KEY = "layout-v1"
 
 # Distinct prefix so a user template can never collide with `template-N`.
 USER_ID_PREFIX = "user-template-"
+
+# Layout v2 owns body order, Summary presence, and header rules in its document
+# tree. Leaving the legacy controls enabled would expose settings that the v2
+# renderer must intentionally ignore.
+_V2_UNSUPPORTED_STYLE_FIELDS = frozenset(
+    {"sectionOrder", "showSummary", "showHeaderDivider"}
+)
+
+
+def _supported_style_fields(layout: dict) -> list[str]:
+    is_structured_v2 = (
+        layout.get("version") == 2
+        and isinstance(layout.get("dividerDefaults"), dict)
+        and isinstance(layout.get("page"), dict)
+        and isinstance(layout.get("blocks"), list)
+        and all(isinstance(block, dict) and "contentFlow" in block for block in layout["blocks"])
+    )
+    if not is_structured_v2:
+        # Empty means "all" to the existing StyleEditor, preserving v1.
+        return []
+    return [
+        field
+        for field in ResumeStyle.model_fields
+        if field not in _V2_UNSUPPORTED_STYLE_FIELDS
+    ]
 
 
 class TemplateNotFound(LookupError):
@@ -56,8 +81,7 @@ def _row_to_definition(row) -> TemplateDefinition:
         active=bool(row.is_active),
         rendererKey=row.renderer_key,
         defaultStyle=row.default_style or {},
-        # A layout template honours every style field; nothing is ignored.
-        supportedStyleFields=[],
+        supportedStyleFields=_supported_style_fields(row.layout or {}),
         source=row.source,
         layout=row.layout or {},
         ownerProfileId=None,
@@ -149,7 +173,7 @@ def create_user_template(
                 id=uuid7(),
                 template_id=row_id,
                 version=1,
-                layout=parsed_layout.model_dump(),
+                layout=dump_layout(parsed_layout),
                 default_style=style,
             )
         )
@@ -214,7 +238,7 @@ def update_user_template(
 
     new_layout = existing.layout
     if layout is not None:
-        new_layout = validate_layout(layout).model_dump()
+        new_layout = dump_layout(validate_layout(layout))
 
     new_style = existing.defaultStyle
     if default_style is not None:

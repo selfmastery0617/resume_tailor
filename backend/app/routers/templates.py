@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.layout import LayoutError, default_layout
+from app.schemas.layout import LayoutError, default_layout, dump_layout
 from app.schemas.style import ResumeStyle
 from app.schemas.template import TemplateDefinition, TemplateListResponse
 from app.services.templates import store
@@ -57,7 +57,7 @@ def get_templates(include_inactive: bool = False):
 @router.get("/default-layout")
 def get_default_layout():
     """Starting document for a new template, so the builder need not hardcode it."""
-    return default_layout().model_dump()
+    return dump_layout(default_layout())
 
 
 @router.post("", response_model=TemplateDefinition, status_code=201)
@@ -73,7 +73,7 @@ def create_template(payload: CreateTemplateRequest):
             # renderers have no layout document to copy.
             layout = payload.layout
             if layout is None and not source.layout:
-                layout = default_layout().model_dump()
+                layout = dump_layout(default_layout())
             return store.duplicate_template(source, name=payload.name or None, layout=layout)
 
         return store.create_user_template(

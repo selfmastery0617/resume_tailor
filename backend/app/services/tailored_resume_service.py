@@ -100,8 +100,8 @@ def _timelines(experience: dict[str, Any]) -> dict[str, tuple[str, str, bool]]:
     return fallback
 
 
-def _role_details(data: ResumeData, company: str) -> tuple[str, str]:
-    """Job title and location for `company`, taken from what the user wrote.
+def _role_details(data: ResumeData, company: str) -> tuple[str, str, str]:
+    """Job title, location, and company summary from what the user wrote.
 
     database.json records company/product/timeline but no job title, and
     inventing one would contradict the "do not invent employers or dates" rule
@@ -112,8 +112,8 @@ def _role_details(data: ResumeData, company: str) -> tuple[str, str]:
     target = (company or "").strip().casefold()
     for entry in data.experience:
         if (entry.company or "").strip().casefold() == target:
-            return entry.title, entry.location
-    return data.profile.professionalTitle, ""
+            return entry.title, entry.location, entry.companySummary
+    return data.profile.professionalTitle, "", ""
 
 
 def build_tailored_data(profile: Profile, experience: dict[str, Any]) -> ResumeData:
@@ -133,7 +133,7 @@ def build_tailored_data(profile: Profile, experience: dict[str, Any]) -> ResumeD
             continue
 
         company = selection.get("company") or ""
-        title, location = _role_details(data, company)
+        title, location, profile_company_summary = _role_details(data, company)
         start, end, current = timelines.get(key, ("", "", False))
 
         roles.append(
@@ -145,6 +145,14 @@ def build_tailored_data(profile: Profile, experience: dict[str, Any]) -> ResumeD
                 startDate=start,
                 endDate=end,
                 current=current,
+                # Stored extractions created before company summaries existed
+                # have neither key, so tailored roles remain backwards-safe.
+                companySummary=(
+                    selection.get("companySummary")
+                    or selection.get("summary")
+                    or profile_company_summary
+                    or ""
+                ).strip(),
                 # RG-FR-005: one bullet per line.
                 description="\n".join(b.strip() for b in bullets),
             )

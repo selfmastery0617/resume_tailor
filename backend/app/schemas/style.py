@@ -21,14 +21,66 @@ SectionId = Literal["summary", "experience", "skills", "education"]
 PersonalField = Literal["address", "phone", "email", "birthday"]
 TextAlign = Literal["left", "center", "right"]
 
-# Fonts must be available to both the browser preview and Playwright's PDF
-# rendering, so the list is deliberately conservative.
+# Broad document-font catalog shared with the frontend. Chromium uses an
+# installed face when available and a category-safe fallback otherwise.
 APPROVED_FONTS = (
     "Template default",
+    "Arial",
+    "Arial Black",
+    "Arial Narrow",
+    "Book Antiqua",
+    "Calibri",
+    "Cambria",
+    "Candara",
+    "Century Gothic",
+    "Comic Sans MS",
+    "Consolas",
+    "Courier New",
+    "Garamond",
     "Georgia",
-    "Times New Roman",
     "Helvetica",
+    "Impact",
+    "Lucida Console",
+    "Lucida Sans Unicode",
+    "Palatino Linotype",
+    "Segoe UI",
     "System UI",
+    "Tahoma",
+    "Times New Roman",
+    "Trebuchet MS",
+    "Verdana",
+    "Alegreya",
+    "Bitter",
+    "Cabin",
+    "Comfortaa",
+    "Crimson Text",
+    "EB Garamond",
+    "Fira Sans",
+    "IBM Plex Sans",
+    "Inconsolata",
+    "Inter",
+    "Lato",
+    "Lexend",
+    "Libre Baskerville",
+    "Libre Franklin",
+    "Merriweather",
+    "Montserrat",
+    "Noto Sans",
+    "Noto Serif",
+    "Open Sans",
+    "Oswald",
+    "Playfair Display",
+    "Poppins",
+    "PT Sans",
+    "PT Serif",
+    "Raleway",
+    "Roboto",
+    "Roboto Condensed",
+    "Roboto Mono",
+    "Source Sans 3",
+    "Source Serif 4",
+    "Ubuntu",
+    "Work Sans",
 )
 
 ALLOWED_BULLET_CHARS = ("●", "•", "◦", "-", "*", "▪", "▸")
@@ -245,6 +297,14 @@ def validate_overrides(overrides: dict | None) -> dict:
     """
     if not overrides:
         return {}
-    ResumeStyleOverrides(**overrides)  # shape check: unknown keys / wrong types
-    merge_style(overrides)  # value check: ranges, colors, fonts, orders
-    return {key: value for key, value in overrides.items() if value is not None}
+    parsed = ResumeStyleOverrides(**overrides)
+    # Return Pydantic's normalized values, not the original input. Besides
+    # making JSON storage deterministic, this prevents block-level overrides
+    # from retaining coercible-but-wrong runtime types such as "12" for a
+    # numeric font size.
+    cleaned = parsed.model_dump(exclude_none=True)
+    normalized = merge_style(cleaned).model_dump()
+    # Keep override sparsity while retaining transformations made by the full
+    # model (notably completing partial section/contact order arrays). This
+    # makes the JSON consumed by browser preview identical to PDF rendering.
+    return {key: normalized[key] for key in cleaned}
