@@ -1,6 +1,87 @@
 # Plan: user-created, manually edited templates
 
-## What changes conceptually
+> Status (layout v2): implemented. The flat v1 format remains renderable and
+> read-only; new templates use the constrained five-block format below.
+
+## Current v2 contract
+
+A user template has exactly these semantic blocks:
+
+| Block | Presence | Sections |
+|---|---|---|
+| Header | required | Name, Professional title, Contact info |
+| Summary | optional | Block title, Summary content |
+| Skills | required | Block title, Skills |
+| Experience | required | Block title, repeating groups |
+| Education | required | Block title, repeating groups |
+
+The Experience group blueprint contains Company name, Role title, Period,
+Company summary, Bullets, and optional Location. The Education blueprint
+contains University name, Degree, Date, and optional Location. A blueprint is
+stored once and repeated for the profile's current entries; templates never
+serialize one layout group per company or school.
+
+Sections can move only inside their owning block. Each block has a `contentFlow`
+of rows, one or two columns per row, and ordered section references. Experience
+and Education also have an `itemFlow` for their repeating group. Their compact
+metadata (company/university, role/degree, period/date, and location) can use up
+to four cells in one row. A cell can stack its sections or merge them inline,
+and can align its content left, center, or right. Long summaries and bullets
+remain in one/two-column stacked flow so they paginate safely. Blocks can move
+between declared page columns, but the editor has no arbitrary x/y coordinates.
+Every section remains structurally present and has an independent `hidden`
+flag, allowing authors to show or hide it without weakening block cardinality.
+Each section can also override the specific text-color field used by its
+renderer, while retaining a one-click path back to its inherited template or
+block color.
+
+The page contract stores paper size plus top, bottom, left, and right margins.
+Supported sizes are Letter, Tabloid, Legal, Statement, Executive, Folio, A3,
+A4, A5, B4, and B5. Preview pagination and Playwright PDF generation consume
+the same dimensions. Template defaults also store the selected font family;
+the editor exposes a broad document-font catalog with category-safe fallbacks.
+
+Dividers belong to the gap before the following visible item:
+
+- gaps between stacked rows, sections, blocks, and regions are horizontal;
+- gaps between adjacent columns are vertical;
+- gaps between sections merged into one inline cell are character separators
+  or inline rules;
+- a gap can contain a line or one character;
+- character gaps inherit `dividerDefaults.character` unless explicitly
+  overridden, including Contact info and inline Skills; and
+- every visible horizontal, vertical, or inline divider can override its color
+  independently, falling back to the effective section color; and
+- every horizontal boundary can override space before and after its divider;
+  a boundary with no visible divider can still carry vertical spacing; and
+- hidden or empty content removes its adjacent divider, so no orphan rule
+  prints.
+
+Backend validation enforces exact block and section cardinality, owning-block
+scope, global ID uniqueness, one/two-column general limits and four-cell entry
+metadata limits, widths totalling 100%, valid gap ownership, bounded labels and
+divider characters, and normalized style values. The canonical TypeScript contract lives in
+`frontend/src/resume/layoutTypes.ts`; the authoritative validator is
+`backend/app/schemas/layout.py`.
+
+`companySummary` is a real Experience field. It is editable on a profile and is
+also carried from corpus product summaries through extraction persistence into
+tailored resumes. The guarded Alembic revision adds it to both profile and
+extracted experience rows.
+
+### Compatibility
+
+- `layout-v1` remains the generic renderer key and dispatches by document
+  shape, so existing flat layouts still render.
+- Historical flat layouts that happened to store `version: 2` are detected by
+  shape and stay on the legacy path.
+- Legacy layouts are read-only in the new builder. **Upgrade as five-block
+  copy** performs an explicit best-effort conversion, preserves supported
+  styles and keep-together choices, collapses extra columns to the v2 maximum,
+  and never rewrites the original template.
+- Generated-document layout snapshots remain immutable.
+
+## Original design background
 
 Today a template is **code**: `rendererKey` → a React component, ten of them, with
 a fixed single-column structure. `ResumeDocument` decides that the header comes
@@ -56,9 +137,10 @@ supports adding a positioned header later without a migration.
 
 ---
 
-## Layout schema
+## Legacy v1 layout schema (read-only)
 
-One JSON document per template, validated server-side.
+This was the first builder wire format. It remains available for rendering and
+explicit upgrade only; new templates do not use it.
 
 ```jsonc
 {
@@ -137,9 +219,10 @@ silently breaks the moment templates become editable.
 
 ---
 
-## Rendering
+## Rendering architecture
 
-Add one renderer, `LayoutRenderer`, registered as `rendererKey: "layout-v1"`:
+`LayoutRenderer`, registered as `rendererKey: "layout-v1"`, now dispatches the
+legacy flat document and the structured v2 document by validated shape:
 
 ```
 getRenderer(rendererKey)
@@ -147,9 +230,10 @@ getRenderer(rendererKey)
   └── "layout-v1"       → LayoutRenderer(layout, data, style)
 ```
 
-It walks regions → columns → blocks and reuses the existing section renderers
-for `experience` / `education` / `skills`, so bullet parsing, date handling,
-empty-section removal, and page-break rules are not reimplemented.
+The v1 path reuses the aggregate section renderers unchanged. The v2 path uses
+the same atomic content components through visibility-aware flows and repeating
+group blueprints, so bullet parsing, dates, empty-content removal, and page
+breaks stay consistent.
 
 Preview and PDF need **no changes**: both already call `getRenderer()`, so a
 layout template flows through the existing paginated preview and print route
@@ -159,58 +243,55 @@ automatically. That is the payoff of the content-only refactor already done.
 
 ## Editor UI
 
-New tab or a mode on Templates: **Template Builder**.
+The **Template Builder** tab now combines a structure editor, live preview, and
+template settings panel.
 
 ```
-┌──────────┬────────────────────────┬──────────────┐
-│ Blocks   │  Canvas (live preview) │ Properties   │
-│ palette  │  drag to reorder/move  │ of selection │
-└──────────┴────────────────────────┴──────────────┘
+┌──────────────────┬────────────────────────┬──────────────────┐
+│ Blocks/sections  │  Canvas (live preview) │ Template settings│
+│ rows and columns │  paginated output      │ divider defaults │
+└──────────────────┴────────────────────────┴──────────────────┘
 ```
 
-- **Library:** `@dnd-kit/core` + `@dnd-kit/sortable`. Keyboard-accessible out of
-  the box, which matters because §9.4 requires keyboard operation and HTML5
-  drag-and-drop is notoriously bad at it. Every drag action also needs a
-  non-drag equivalent (↑/↓ buttons, a column dropdown) — the existing section
-  reorder already works this way.
-- **Canvas:** the real `ResumePreview` with a selection overlay, so what you drag
-  is what prints. No separate "design mode" rendering — that is how editors
-  drift from their output.
-- **Properties panel:** reuses `StyleEditor` controls, scoped to the selected
-  block instead of the whole document.
-- Save / Cancel / Reset and the unsaved-changes guard already exist and carry
-  over.
+- **Controls:** Every placement is keyboard-operable through move buttons,
+  destination selectors, row/column controls, and split sliders. Invalid
+  cross-block destinations do not exist.
+- **Canvas:** the real `ResumePreview` renders the current draft. There is no
+  separate design-mode renderer that can drift from printed output.
+- **Settings panel:** controls the inherited divider character and optional
+  Summary; block cards own headings, optional locations, flows, and gap rules.
+- Save / Cancel and the unsaved-changes guard share the existing template CRUD
+  workflow.
 
 ---
 
-## Build order
+## Original build order (completed)
 
 | Step | Deliverable | Why this order |
 |---|---|---|
-| 1 | Layout schema + server-side validator + unit tests | Everything else depends on the contract; cheapest place to get it wrong |
-| 2 | `LayoutRenderer` + express one built-in as layout JSON | Proves the schema can express a real template before any UI exists |
-| 3 | DB migration, `source`/`layout_json`, snapshot columns | Persistence before editing, so nothing is lost |
-| 4 | CRUD API: duplicate, create, save, delete user templates | Testable via API alone |
-| 5 | Builder UI: selection + properties panel, no drag yet | Reorder via buttons; already accessible |
-| 6 | Drag-and-drop layer on top | Purely additive |
-| 7 | PDF verification across user templates | Confirm parity holds for layouts |
+| 1 | Versioned schema, strict validator, and unit tests | Establish one shared contract |
+| 2 | Atomic v2 renderer and repeat-group flows | Prove every semantic section renders |
+| 3 | Company-summary persistence and guarded migration | Make the new section real data |
+| 4 | Constrained builder operations and UI | Expose only schema-valid placements |
+| 5 | Explicit legacy upgrade-as-copy | Preserve history without silent rewrites |
+| 6 | Browser save/upgrade checks and multipage PDF verification | Confirm UI/API/renderer parity |
 
-Steps 1–4 are backend-only and independently verifiable; the UI cannot go wrong
-in ways the API hasn't already caught.
 
 ---
 
 ## Risks
 
-**Two-column pagination.** Columns that flow independently across pages are
-genuinely hard — CSS multi-column breaks awkwardly and the slice-based preview
-assumes a single flow. Simplest sound approach: treat a two-column region as
-non-breaking (fits on one page) in v1, and only allow the single-column body
-region to span pages.
+**Two-column pagination.** Natural overflow is allowed to fragment a two-column
+region so both columns can use the remainder of the current page. The
+slice-based preview still assumes one shared vertical flow, so an explicit page
+break inside only one column cannot exactly mirror Chromium's independent
+column fragmentation. Avoid that combination until the preview has per-column
+pagination; ordinary two-column overflow remains supported.
 
 **Preview/PDF drift.** Mitigated by rendering the canvas with the real preview
 component, but user layouts widen the space of possible content enormously.
 Worth a visual-regression pass over a few generated layouts.
 
-**Scope.** This is comparable in size to Phases 1–3 combined. Steps 1–4 alone are
-a solid increment and leave the app fully working without any UI change.
+**Scope boundary.** The builder intentionally stops at structured flow. Free
+absolute positioning would require a different pagination model and is not a
+compatible extension of v2.

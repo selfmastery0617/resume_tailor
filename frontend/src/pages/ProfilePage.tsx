@@ -165,7 +165,7 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
         ...prev.experience,
         {
           id: newId("exp"), company: "", title: "", location: "",
-          startDate: "", endDate: "", current: false, description: "",
+          startDate: "", endDate: "", current: false, companySummary: "", description: "",
         },
       ],
     }));
@@ -410,6 +410,19 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
                       onChange={(e) => updateExperience(entry.id, { current: e.target.checked })}
                     />
                   </div>
+                </div>
+                <div className="prompt-section">
+                  <label htmlFor={`exp-company-summary-${entry.id}`}>Company summary</label>
+                  <textarea
+                    id={`exp-company-summary-${entry.id}`}
+                    className="prompt-textarea"
+                    rows={3}
+                    placeholder="Briefly describe the company, product, or organization."
+                    value={entry.companySummary}
+                    onChange={(e) =>
+                      updateExperience(entry.id, { companySummary: e.target.value })
+                    }
+                  />
                 </div>
                 <div className="prompt-section">
                   <label htmlFor={`exp-desc-${entry.id}`}>

@@ -69,6 +69,7 @@ class JobSelection:
     company: str
     product: str
     timeline: str = ""
+    company_summary: str = ""
     projects: list[str] = field(default_factory=list)
     bullets: list[str] = field(default_factory=list)
     source_challenge_ids: list[str] = field(default_factory=list)
@@ -213,6 +214,7 @@ def _select_job1(db: ExperienceDatabase, company_name: str, query: str) -> tuple
         company=entry.company,
         product=entry.product,
         timeline=entry.timeline,
+        company_summary=entry.summary,
         projects=sorted({p.project.name for p in picked}),
         source_challenge_ids=[p.challenge.id for p in picked],
     )
@@ -300,6 +302,7 @@ def _select_job2(db: ExperienceDatabase, exclude_company: str, query: str) -> tu
         company=entry.company,
         product=entry.product,
         timeline=entry.timeline,
+        company_summary=entry.summary,
         projects=chosen_projects,
         source_challenge_ids=[p.challenge.id for p in picked],
     )
@@ -689,6 +692,7 @@ def _role_payload(label: str, selection: JobSelection) -> dict[str, Any]:
         "company": selection.company,
         "product": selection.product,
         "timeline": selection.timeline,
+        "companySummary": selection.company_summary,
         "projects": list(selection.projects),
         "bullets": list(selection.bullets),
     }
@@ -959,6 +963,11 @@ def _store_run(conn, job_row, payload: dict[str, Any]) -> None:
                 company_name=selection.get("company") or "",
                 product_name=selection.get("product") or "",
                 timeline=selection.get("timeline") or "",
+                company_summary=(
+                    selection.get("companySummary")
+                    or selection.get("summary")
+                    or ""
+                ),
             )
             .returning(extraction_roles.c.id)
         ).scalar_one()
@@ -1033,6 +1042,7 @@ def _load_run(conn, job_row) -> dict[str, Any] | None:
             "company": role.company_name,
             "product": role.product_name,
             "timeline": role.timeline,
+            "companySummary": role.company_summary,
             "projects": [],
             "bullets": bullets,
             "source_challenge_ids": [],

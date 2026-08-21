@@ -1,6 +1,6 @@
 import axios from "axios";
 import { BACKEND_URL } from "../config";
-import type { TemplateLayout } from "../resume/LayoutRenderer";
+import type { TemplateLayout } from "../resume/layoutTypes";
 import type { ResumeStyle, TemplateDefinition } from "../resume/types";
 
 export async function fetchDefaultLayout(): Promise<TemplateLayout> {

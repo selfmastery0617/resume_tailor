@@ -111,6 +111,7 @@ def _load_data(conn: Connection, profile_id: UUID, row) -> ResumeData:
             startDate=r.start_date,
             endDate=r.end_date,
             current=r.is_current,
+            companySummary=r.company_summary,
             description=r.description,
         )
         for r in conn.execute(
@@ -176,6 +177,7 @@ def _write_sections(conn: Connection, profile_id: UUID, user_id: UUID, data: Res
                     # flag and drop the text rather than failing the save.
                     "end_date": "" if item.current else item.endDate,
                     "is_current": item.current,
+                    "company_summary": item.companySummary,
                     "description": item.description,
                     "sort_order": index,
                 }

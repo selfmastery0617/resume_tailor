@@ -19,17 +19,19 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from app.schemas.layout import PAPER_DIMENSIONS_IN
+
 from .render_cache import render_cache
 
 load_dotenv()
 
-# Page specification (6.1). These values are the single source of truth; the
-# React renderer mirrors them so preview and PDF agree.
-PAGE_FORMAT = "Letter"
-MARGIN_TOP_IN = 0.7
-MARGIN_BOTTOM_IN = 0.5
-MARGIN_LEFT_IN = 0.65
-MARGIN_RIGHT_IN = 0.65
+DEFAULT_PAGE_SIZE = "letter"
+DEFAULT_MARGINS_IN = {
+    "top": 0.7,
+    "bottom": 0.5,
+    "left": 0.65,
+    "right": 0.65,
+}
 
 READY_ATTR = "data-pdf-ready"
 HARD_TIMEOUT_S = 30.0  # RG-FR-023
@@ -42,6 +44,30 @@ PRODUCER = "JobTailor AI PDF Service"
 
 class PdfGenerationError(RuntimeError):
     """Raised for any failure that should surface as PDF_GENERATION_FAILED."""
+
+
+def _page_spec(payload: dict[str, Any]) -> tuple[float, float, dict[str, float]]:
+    """Validated template geometry, with legacy/built-in Letter fallbacks."""
+
+    layout = payload.get("layout")
+    page = layout.get("page") if isinstance(layout, dict) else None
+    page = page if isinstance(page, dict) else {}
+    size = page.get("size", DEFAULT_PAGE_SIZE)
+    width, height = PAPER_DIMENSIONS_IN.get(size, PAPER_DIMENSIONS_IN[DEFAULT_PAGE_SIZE])
+
+    def margin(field: str, fallback: float) -> float:
+        value = page.get(field, fallback)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return fallback
+        return max(0.0, min(2.0, float(value)))
+
+    margins = {
+        "top": margin("marginTopIn", DEFAULT_MARGINS_IN["top"]),
+        "bottom": margin("marginBottomIn", DEFAULT_MARGINS_IN["bottom"]),
+        "left": margin("marginLeftIn", DEFAULT_MARGINS_IN["left"]),
+        "right": margin("marginRightIn", DEFAULT_MARGINS_IN["right"]),
+    }
+    return width, height, margins
 
 
 def frontend_base_url() -> str:
@@ -134,14 +160,14 @@ def _render_sync(token: str, headless: bool = True) -> tuple[bytes, int]:
             if time.monotonic() - started > HARD_TIMEOUT_S:
                 raise PdfGenerationError("PDF generation exceeded the 30s timeout.")
 
+            payload = render_cache.get(token) or {}
+            page_width, page_height, margins = _page_spec(payload)
             pdf_bytes = page.pdf(
-                format=PAGE_FORMAT,
+                width=f"{page_width}in",
+                height=f"{page_height}in",
                 print_background=True,  # 6.1
                 margin={
-                    "top": f"{MARGIN_TOP_IN}in",
-                    "bottom": f"{MARGIN_BOTTOM_IN}in",
-                    "left": f"{MARGIN_LEFT_IN}in",
-                    "right": f"{MARGIN_RIGHT_IN}in",
+                    side: f"{value}in" for side, value in margins.items()
                 },
             )
             page_count = page.evaluate("() => window.__resumePageCount ?? 0")

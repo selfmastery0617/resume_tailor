@@ -12,7 +12,8 @@
  */
 
 import type { ReactElement } from "react";
-import { LayoutRenderer, type TemplateLayout } from "../LayoutRenderer";
+import { LayoutRenderer } from "../LayoutRenderer";
+import type { TemplateLayout } from "../layoutTypes";
 import { ResumeDocument, type TemplateChrome } from "../ResumeDocument";
 import type { TemplateRendererProps } from "../types";
 
@@ -41,9 +42,8 @@ export const Template8 = makeRenderer({
 export const Template9 = makeRenderer({ headingStyle: "rule", headerAccentBar: true });
 export const Template10 = makeRenderer({ headingStyle: "boxed", headingTransform: "uppercase" });
 
-/** User-built templates. Renders the layout document supplied alongside the
- *  data; falls back to the default renderer if a layout is somehow missing so a
- *  malformed record never blanks the page. */
+/** User-built templates. LayoutRenderer dispatches by document version, so
+ * existing layout-v1 records and the structured v2 builder share this entry. */
 export function LayoutTemplate({ data, style, layout }: TemplateRendererProps): ReactElement {
   if (!layout) return <ResumeDocument data={data} style={style} />;
   return <LayoutRenderer data={data} style={style} layout={layout as TemplateLayout} />;
@@ -61,6 +61,9 @@ export const RENDERERS: Record<string, (props: TemplateRendererProps) => ReactEl
   "renderer-9": Template9,
   "renderer-10": Template10,
   "layout-v1": LayoutTemplate,
+  // New records may use the explicit key; layout-v1 remains a generic alias so
+  // a backend rollout can start emitting v2 documents before migrating keys.
+  "layout-v2": LayoutTemplate,
 };
 
 export const DEFAULT_RENDERER_KEY = "renderer-1";

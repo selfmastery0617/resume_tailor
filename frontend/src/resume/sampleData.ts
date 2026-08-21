@@ -33,6 +33,7 @@ export const SAMPLE_RESUME: ResumeData = {
       startDate: "Mar 2021",
       endDate: "",
       current: true,
+      companySummary: "Platform engineering for a high-volume logistics network.",
       description:
         "Led migration of a monolith to **event-driven services**, cutting p99 latency by 42%.\n" +
         "Designed the public REST API now serving 30M requests per day.\n" +
@@ -46,6 +47,7 @@ export const SAMPLE_RESUME: ResumeData = {
       startDate: "Jun 2018",
       endDate: "Feb 2021",
       current: false,
+      companySummary: "Analytics products for operational and product teams.",
       description:
         "Built the ingestion pipeline processing 4TB of daily telemetry.\n" +
         "Reduced infrastructure spend 28% by right-sizing the warehouse workload.",

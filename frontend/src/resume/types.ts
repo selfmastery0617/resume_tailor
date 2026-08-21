@@ -27,6 +27,8 @@ export interface Experience {
   startDate: string;
   endDate: string;
   current: boolean;
+  /** Optional prose shown before the achievement bullets. */
+  companySummary: string;
   description: string;
 }
 
