@@ -32,7 +32,7 @@ COOKIE_DOMAIN = re.compile(r"jobright")
 # one of these the profile holds nothing but anonymous analytics cookies, and
 # treating that as a session is what produced "connected" cards that failed on
 # the first request.
-AUTH_COOKIE_NAMES = ("sessionId", "SESSION", "JSESSIONID", "token", "jwt")
+AUTH_COOKIE_NAMES = ("sessionId", "SESSION", "SESSION_ID", "JSESSIONID", "token", "jwt")
 
 # The verdict is cached briefly so opening Settings repeatedly does not hit
 # Jobright each time. Much shorter than DeepSeek's: this probe is cheap.
