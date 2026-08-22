@@ -34,6 +34,7 @@ from app.models import (
     generated_documents,
     jobs,
     profiles,
+    settings,
 )
 from app.schemas.job import JobListing
 
@@ -78,12 +79,24 @@ def _today() -> date:
 
 def active_profile_id(conn: Connection | None = None) -> UUID:
     """Which resume identity owns the jobs being imported and shown."""
-    from app.services import settings_service
-
-    configured = (settings_service.get_settings().get("resumeProfile") or "").strip()
     user_id = current_user_id()
 
     def resolve(c: Connection) -> UUID:
+        # Read resumeProfile directly rather than through
+        # settings_service.get_settings(): that function scopes its own
+        # result by calling back into active_profile_id() (via
+        # _active_profile()), which would recurse forever if this used it
+        # too — each level opening another DB connection until the pool
+        # itself is exhausted, rather than a clean RecursionError.
+        row = c.execute(
+            select(settings.c.value).where(
+                settings.c.scope == "user",
+                settings.c.user_id == user_id,
+                settings.c.key == "resumeProfile",
+            )
+        ).first()
+        configured = str(row.value or "").strip() if row else ""
+
         if configured:
             try:
                 found = c.execute(
@@ -402,7 +415,7 @@ def run_for_job(conn: Connection, job_id: str) -> UUID | None:
 
 # What the table may change. Everything else about a job comes from the import
 # or from the pipeline.
-EDITABLE_FIELDS = ("date_added", "title", "company", "url", "location", "status")
+EDITABLE_FIELDS = ("date_added", "title", "company", "url", "location", "status", "description")
 
 # The two a person may choose between. 'not_applied' is reachable only by the
 # application clearing a row, never by a user: "no resume yet" is a fact about
@@ -465,6 +478,7 @@ def create_job(fields: dict[str, Any]) -> dict[str, Any]:
                 company=str(fields.get("company") or ""),
                 location=str(fields.get("location") or ""),
                 url=str(fields.get("url") or ""),
+                description=str(fields.get("description") or ""),
                 # A row is dated the day it appears, unless one was supplied.
                 date_added=_coerce_date(fields.get("date_added")) or _today(),
                 first_seen_at=now,
@@ -497,7 +511,7 @@ def update_job(job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
 
         values: dict[str, Any] = {}
 
-        for field in ("title", "company", "location", "url"):
+        for field in ("title", "company", "location", "url", "description"):
             if field in patch:
                 values[field] = str(patch[field] or "").strip()
 

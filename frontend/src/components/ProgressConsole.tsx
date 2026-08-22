@@ -63,23 +63,23 @@ function EventData({ data }: { data: Record<string, unknown> }) {
     );
   }
 
-  const tally = data.tally as { product: string; count: number }[] | undefined;
+  const tally = data.tally as { product: string; score: number }[] | undefined;
   if (tally?.length) {
-    const max = Math.max(...tally.map((t) => t.count));
+    const max = Math.max(...tally.map((t) => t.score));
     rows.push(
       <div key="tally" className="console-bars">
         {tally.map((t) => (
           <div key={t.product} className="console-bar-row">
             <span className="console-bar-label">{t.product}</span>
-            <span className="console-bar" style={{ width: `${(t.count / max) * 100}%` }} />
-            <span className="console-score">{t.count}</span>
+            <span className="console-bar" style={{ width: `${(t.score / max) * 100}%` }} />
+            <span className="console-score">{t.score.toFixed(3)}</span>
           </div>
         ))}
       </div>,
     );
   }
 
-  const projects = data.projects as { project: string; bestScore: number }[] | undefined;
+  const projects = data.projects as { project: string; totalScore: number }[] | undefined;
   if (projects?.length) {
     const chosen = new Set((data.chosen as string[] | undefined) ?? []);
     rows.push(
@@ -87,7 +87,7 @@ function EventData({ data }: { data: Record<string, unknown> }) {
         {projects.map((p) => (
           <li key={p.project} className={chosen.has(p.project) ? "console-chosen" : undefined}>
             {chosen.has(p.project) ? "✓ " : "· "}
-            {p.project} <span className="console-score">{p.bestScore.toFixed(3)}</span>
+            {p.project} <span className="console-score">{p.totalScore.toFixed(3)}</span>
           </li>
         ))}
       </ul>,

@@ -84,6 +84,7 @@ class JobPatch(BaseModel):
     url: str | None = None
     location: str | None = None
     status: str | None = None
+    description: str | None = None
 
 
 class CreateJobRequest(BaseModel):
@@ -94,6 +95,7 @@ class CreateJobRequest(BaseModel):
     company: str = ""
     url: str = ""
     location: str = ""
+    description: str = ""
 
 
 class DeleteRowsRequest(BaseModel):

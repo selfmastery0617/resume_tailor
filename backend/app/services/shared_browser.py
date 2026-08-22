@@ -98,7 +98,14 @@ class SharedBrowser:
         """
         if not self.is_open():
             return None
-        return self.run(_read_cookies(domain), timeout=timeout, start_if_closed=False)
+        try:
+            return self.run(_read_cookies(domain), timeout=timeout, start_if_closed=False)
+        except Exception:  # noqa: BLE001 - a person can close the window between
+            # is_open() and the command actually running (e.g. clicking the X
+            # right after finishing a sign-in), which surfaces here as a raw
+            # Playwright TargetClosedError. That is exactly "nothing live to
+            # read" too, same as the window never having been open.
+            return None
 
     def check_page(
         self, match: re.Pattern[str], check: Callable[[Any], bool], timeout: float = 10.0
@@ -122,7 +129,13 @@ class SharedBrowser:
             )
             return None if page is None else check(page)
 
-        return self.run(run, timeout=timeout, start_if_closed=False)
+        try:
+            return self.run(run, timeout=timeout, start_if_closed=False)
+        except Exception:  # noqa: BLE001 - see the matching note in cookies_for:
+            # the window can close between is_open() and the command actually
+            # running, which surfaces as a raw Playwright error here. Treat it
+            # the same as "nothing live to check".
+            return None
 
     def run(
         self,

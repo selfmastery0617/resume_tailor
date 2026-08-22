@@ -14,6 +14,10 @@ export interface ResumeGridContext {
   experienceExtracting: Map<string, number>;
   /** Whether this job already has bullets, which decides the button's label. */
   experienceResults: Record<string, ExperienceResult>;
+  /** A bulk run is in progress for other rows -- disable this row's own
+   *  button rather than let a stray click race the shared DeepSeek/ChatGPT
+   *  browser session the bulk run is already using. */
+  bulkRunning: boolean;
   onGenerateResume: (job: Job) => void;
 }
 
@@ -72,6 +76,7 @@ export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
           type="button"
           className="skills-extract-button"
           onClick={() => context.onGenerateResume(data)}
+          disabled={context.bulkRunning}
           title={`${saved.filePath} is missing — click to generate it again.`}
         >
           ⚠️ Regenerate
@@ -96,6 +101,7 @@ export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
             type="button"
             className="resume-regenerate"
             onClick={() => context.onGenerateResume(data)}
+            disabled={context.bulkRunning}
             title="Generate again, overwriting the saved file"
             aria-label="Regenerate resume"
           >
@@ -120,13 +126,14 @@ export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
       type="button"
       className="skills-extract-button"
       onClick={() => context.onGenerateResume(data)}
+      disabled={context.bulkRunning}
       title={
         extracted
           ? "Render the extracted experience to a PDF and save it to the output folder"
           : "Extract experience for this job, then save the PDF to the output folder"
       }
     >
-      {extracted ? "📄 Generate PDF" : "🧬 Extract & Generate"}
+      {extracted ? "📄 Generate PDF" : "🧬 Extract"}
     </button>
   );
 }

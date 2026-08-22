@@ -123,10 +123,12 @@ def _rank(query: str, rows: Sequence[tuple], label: str = "") -> list[ScoredChal
 def _best_product(
     scored: Sequence[ScoredChallenge], min_projects: int = 1
 ) -> ProductEntry | None:
-    """Highest-scoring product, judged by its best few challenges.
+    """Highest-scoring product, judged by the sum of its top few challenges.
 
-    Using the mean of a product's top challenges rather than a single best hit
-    stops one lucky challenge from carrying an otherwise irrelevant product.
+    Summing rather than taking a single best hit rewards a product with
+    several genuinely strong matches over one with just one lucky challenge
+    and nothing else behind it — a company with three solid 0.5s beats one
+    with a single 0.9 and no other supporting evidence.
 
     `min_projects` filters to products that can actually satisfy the caller's
     project quota — Job 2 must yield exactly two projects, and the highest
@@ -143,9 +145,9 @@ def _best_product(
         best_score = float("-inf")
         for key, items in candidates.items():
             top = sorted((i.score for i in items), reverse=True)[:3]
-            mean = sum(top) / len(top)
-            if mean > best_score:
-                best_score = mean
+            total = sum(top)
+            if total > best_score:
+                best_score = total
                 best_key = key
         return best_key
 
@@ -240,16 +242,18 @@ def _select_job2(db: ExperienceDatabase, exclude_company: str, query: str) -> tu
     if not scored:
         raise ExperienceExtractionError("The FAANG companies have no challenges to extract from.")
 
-    # How often each product appears near the top — the signal the company
-    # choice is based on.
-    tally: dict[str, int] = {}
+    # Sum of scores per product near the top — an approximate view of the
+    # signal _best_product actually decides on below (which sums each
+    # product's own top 3, not this top-40 window).
+    tally: dict[str, float] = {}
     for item in scored[:40]:
-        tally[f"{item.company}/{item.product}"] = tally.get(f"{item.company}/{item.product}", 0) + 1
+        key = f"{item.company}/{item.product}"
+        tally[key] = tally.get(key, 0.0) + item.score
     progress.emit(
         "job2",
-        "Product frequency in top 40 matches",
+        "Product scores in top 40 matches",
         level="step",
-        tally=[{"product": k, "count": v} for k, v in
+        tally=[{"product": k, "score": round(v, 4)} for k, v in
                sorted(tally.items(), key=lambda kv: kv[1], reverse=True)],
     )
 
@@ -267,20 +271,22 @@ def _select_job2(db: ExperienceDatabase, exclude_company: str, query: str) -> tu
         level="result",
     )
 
-    # Exactly 2 projects, ranked by their best challenge score.
-    project_best: dict[str, float] = {}
+    # Exactly 2 projects, ranked by the sum of their challenge scores — a
+    # project with several solid matches beats one with a single great hit
+    # and nothing else, same reasoning as _best_product above.
+    project_scores: dict[str, float] = {}
     for item in in_product:
-        project_best[item.project.name] = max(project_best.get(item.project.name, 0.0), item.score)
+        project_scores[item.project.name] = project_scores.get(item.project.name, 0.0) + item.score
     chosen_projects = [
-        name for name, _ in sorted(project_best.items(), key=lambda kv: kv[1], reverse=True)
+        name for name, _ in sorted(project_scores.items(), key=lambda kv: kv[1], reverse=True)
     ][:JOB2_PROJECT_COUNT]
     progress.emit(
         "job2",
-        f"Chose {len(chosen_projects)} project(s) by best challenge score",
+        f"Chose {len(chosen_projects)} project(s) by summed challenge score",
         level="step",
         projects=[
-            {"project": name, "bestScore": round(project_best[name], 4)}
-            for name in sorted(project_best, key=lambda n: project_best[n], reverse=True)
+            {"project": name, "totalScore": round(project_scores[name], 4)}
+            for name in sorted(project_scores, key=lambda n: project_scores[n], reverse=True)
         ],
         chosen=chosen_projects,
     )
