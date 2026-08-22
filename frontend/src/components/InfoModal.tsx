@@ -1,13 +1,25 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { Job } from "../types/job";
 
 interface InfoModalProps {
   job: Job | null;
   bodyText: string | null | undefined;
   onClose: () => void;
+  /** When provided, the body becomes an editable textarea with Save/Cancel
+   *  instead of read-only text — used for editing a job's description. */
+  onSave?: (text: string) => Promise<void>;
 }
 
-export function InfoModal({ job, bodyText, onClose }: InfoModalProps) {
+export function InfoModal({ job, bodyText, onClose, onSave }: InfoModalProps) {
+  const [draft, setDraft] = useState(bodyText ?? "");
+  const [saving, setSaving] = useState(false);
+
+  // Re-seed the draft whenever a different job (or its text) is opened, not
+  // on every keystroke — the effect depends on the job identity, not draft.
+  useEffect(() => {
+    setDraft(bodyText ?? "");
+  }, [job, bodyText]);
+
   useEffect(() => {
     if (!job) return;
 
@@ -19,6 +31,17 @@ export function InfoModal({ job, bodyText, onClose }: InfoModalProps) {
   }, [job, onClose]);
 
   if (!job) return null;
+
+  const handleSave = async () => {
+    if (!onSave) return;
+    setSaving(true);
+    try {
+      await onSave(draft);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -35,8 +58,29 @@ export function InfoModal({ job, bodyText, onClose }: InfoModalProps) {
           </button>
         </div>
         <div className="modal-body">
-          <p>{bodyText}</p>
+          {onSave ? (
+            <textarea
+              className="prompt-textarea"
+              rows={16}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              autoFocus
+              disabled={saving}
+            />
+          ) : (
+            <p>{bodyText}</p>
+          )}
         </div>
+        {onSave && (
+          <div className="settings-actions">
+            <button type="button" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
+            <button type="button" className="primary" onClick={() => void handleSave()} disabled={saving}>
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -85,11 +85,10 @@ const gridThemeDark = themeQuartz.withPart(colorSchemeDark).withParams({
 
 /** Column order is fixed by the spec; the ids double as the selection order. */
 const COLUMN_IDS = [
-  "id",
   "date_added",
   "posted",
-  "title",
   "company",
+  "title",
   "url",
   "location",
   "description",
@@ -98,10 +97,18 @@ const COLUMN_IDS = [
 ];
 
 /** Cells a person may type into. The rest come from the import or the pipeline. */
-const EDITABLE = new Set(["date_added", "title", "company", "url", "location", "status"]);
+const EDITABLE = new Set([
+  "date_added",
+  "title",
+  "company",
+  "url",
+  "location",
+  "status",
+  "description",
+]);
 
 /** Cleared by Delete. Status is excluded: it can never go back to empty. */
-const CLEARABLE = ["date_added", "title", "company", "url", "location"];
+const CLEARABLE = ["date_added", "title", "company", "url", "location", "description"];
 
 
 interface JobsPageProps {
@@ -234,10 +241,8 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
 
   const cellText = useCallback((job: Job, colId: string): string => {
     switch (colId) {
-      case "id":
-        return job.id;
       case "description":
-        return job.description ? "yes" : "";
+        return job.description ?? "";
       case "resume":
         return resumeResults[job.id]?.fileName ?? "";
       default:
@@ -458,8 +463,12 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
 
   // -- pipeline --------------------------------------------------------------
 
+  // Returns whether the job ended up with a saved PDF, so a bulk run can tell
+  // which of several jobs failed without throwing through an unawaited
+  // button click (the single-row caller ignores the return value; a `void`
+  // callback type accepts a function that happens to return one).
   const handleGenerateResume = useCallback(
-    async (job: Job) => {
+    async (job: Job): Promise<boolean> => {
       setError(null);
       if (!experienceResults[job.id]) {
         setExperienceExtracting((prev) => new Map(prev).set(job.id, Date.now()));
@@ -472,7 +481,7 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
           setExperienceResults((prev) => ({ ...prev, [job.id]: result }));
         } catch (err) {
           setError(describeError(err, "Could not extract experience."));
-          return;
+          return false;
         } finally {
           setExperienceExtracting((prev) => {
             const next = new Map(prev);
@@ -492,8 +501,10 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
         setResumeResults((prev) => ({ ...prev, [job.id]: saved }));
         // Generating one flips the row to Ready server-side.
         await reload();
+        return true;
       } catch (err) {
         setError(describeError(err, "Could not generate the resume."));
+        return false;
       } finally {
         setResumeGenerating((prev) => {
           const next = new Map(prev);
@@ -505,6 +516,45 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
     [experienceResults, reload],
   );
 
+  const [bulkGenerating, setBulkGenerating] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
+
+  // Jobs cannot extract/generate concurrently — the DeepSeek/ChatGPT browser
+  // session is one shared profile with a single lock, so a second job's
+  // request would just queue silently behind the first anyway. Running them
+  // one at a time here, instead of firing them all at once, keeps the UI's
+  // per-row "Extracting…"/"Generating…" state honest about what is actually
+  // in flight right now.
+  const generateSelectedResumes = useCallback(async () => {
+    const ids = new Set(selectedIds);
+    const targets = jobs.filter((job) => ids.has(job.id));
+    if (!targets.length || bulkGenerating) return;
+
+    setBulkGenerating(true);
+    setError(null);
+    setNotice(null);
+    setBulkProgress({ done: 0, total: targets.length });
+
+    const failed: string[] = [];
+    for (const job of targets) {
+      const ok = await handleGenerateResume(job);
+      if (!ok) failed.push(job.title || job.company || job.id);
+      setBulkProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+    }
+
+    setBulkGenerating(false);
+    setBulkProgress(null);
+    const succeeded = targets.length - failed.length;
+    if (failed.length) {
+      setError(
+        `Generated ${succeeded}/${targets.length} resume${targets.length === 1 ? "" : "s"}. ` +
+          `Failed: ${failed.join(", ")}`,
+      );
+    } else {
+      setNotice(`Generated ${succeeded} resume${succeeded === 1 ? "" : "s"}.`);
+    }
+  }, [selectedIds, jobs, bulkGenerating, handleGenerateResume]);
+
   const addRow = useCallback(async () => {
     setError(null);
     try {
@@ -515,6 +565,20 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
       setError(describeError(err, "Could not add a row."));
     }
   }, []);
+
+  const saveDescription = useCallback(
+    async (job: Job, text: string) => {
+      setError(null);
+      try {
+        const updated = await updateJob(job.id, { description: text });
+        setJobs((prev) => prev.map((j) => (j.id === job.id ? updated : j)));
+      } catch (err) {
+        setError(describeError(err, "Could not save the description."));
+        throw err;
+      }
+    },
+    [],
+  );
 
   const changeStatus = useCallback(
     async (job: Job, status: string) => {
@@ -606,19 +670,6 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
           p.node?.rowIndex != null ? p.node.rowIndex + 1 : "",
       },
       {
-        colId: "id",
-        headerName: "ID",
-        width: 96,
-        editable: false,
-        // Not the first 8 characters: these are uuid7s, which lead with a
-        // millisecond timestamp, so rows created seconds apart (e.g. one
-        // import batch) share the same prefix and looked like duplicate IDs.
-        // The tail is the random part.
-        valueGetter: (p: ValueGetterParams<Job>) =>
-          p.data?.id?.slice(-8) ?? "",
-        ...selectable("id"),
-      },
-      {
         colId: "date_added",
         field: "date_added",
         headerName: "Date",
@@ -638,15 +689,6 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
         ...selectable("posted"),
       },
       {
-        colId: "title",
-        field: "title",
-        headerName: "Title",
-        flex: 2,
-        minWidth: 180,
-        editable: true,
-        ...selectable("title"),
-      },
-      {
         colId: "company",
         field: "company",
         headerName: "Company",
@@ -654,6 +696,15 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
         minWidth: 130,
         editable: true,
         ...selectable("company"),
+      },
+      {
+        colId: "title",
+        field: "title",
+        headerName: "Title",
+        flex: 2,
+        minWidth: 180,
+        editable: true,
+        ...selectable("title"),
       },
       {
         colId: "url",
@@ -722,20 +773,18 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
   const gridContext: ResumeGridContext &
     RowDeleteContext &
     StatusContext & {
-      onViewDescription: (job: Job) => void;
-      onGenerateDescription: (job: Job) => void;
+      onOpenDescription: (job: Job) => void;
     } = {
     experienceExtracting,
     experienceResults,
     resumeGenerating,
     resumeResults,
+    bulkRunning: bulkGenerating,
     onGenerateResume: handleGenerateResume,
-    onViewDescription: setDescriptionModalJob,
+    onOpenDescription: setDescriptionModalJob,
     deletingRows,
     onDeleteRow: deleteRow,
     onChangeStatus: changeStatus,
-    onGenerateDescription: () =>
-      setNotice("Generate Description isn't wired up yet — its behaviour is still to be decided."),
   };
 
   return (
@@ -751,12 +800,29 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
           + Add row
         </button>
         {selectedIds.length > 0 && (
-          <button type="button" className="danger" onClick={() => void deleteCheckedRows()}>
+          <button
+            type="button"
+            onClick={() => void generateSelectedResumes()}
+            disabled={bulkGenerating}
+          >
+            {bulkGenerating && <span className="spinner" aria-hidden="true" />}
+            {bulkGenerating
+              ? `Generating ${bulkProgress?.done ?? 0}/${bulkProgress?.total ?? selectedIds.length}…`
+              : `Extract Resume for ${selectedIds.length} selected`}
+          </button>
+        )}
+        {selectedIds.length > 0 && (
+          <button
+            type="button"
+            className="danger"
+            onClick={() => void deleteCheckedRows()}
+            disabled={bulkGenerating}
+          >
             Delete {selectedIds.length} selected
           </button>
         )}
         <span className="jobs-hint">
-          Tick rows to delete in bulk · Drag to select cells · Ctrl+C / Ctrl+V ·
+          Tick rows to extract or delete in bulk · Drag to select cells · Ctrl+C / Ctrl+V ·
           Delete clears cells · Ctrl+Delete removes rows
         </span>
         <label className="page-size">
@@ -843,6 +909,11 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
         job={descriptionModalJob}
         bodyText={descriptionModalJob?.description}
         onClose={() => setDescriptionModalJob(null)}
+        onSave={
+          descriptionModalJob
+            ? (text) => saveDescription(descriptionModalJob, text)
+            : undefined
+        }
       />
     </div>
   );
