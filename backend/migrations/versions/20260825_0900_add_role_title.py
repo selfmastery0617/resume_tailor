@@ -18,10 +18,16 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "extraction_roles",
-        sa.Column("title", sa.Text(), nullable=False, server_default=""),
-    )
+    # Guard against 0001_initial_schema having already created this column on
+    # a database built from scratch -- see the matching comment in
+    # 20260818_2323_add_jobs_skills.py.
+    bind = op.get_bind()
+    existing = {c["name"] for c in sa.inspect(bind).get_columns("extraction_roles")}
+    if "title" not in existing:
+        op.add_column(
+            "extraction_roles",
+            sa.Column("title", sa.Text(), nullable=False, server_default=""),
+        )
 
 
 def downgrade() -> None:
