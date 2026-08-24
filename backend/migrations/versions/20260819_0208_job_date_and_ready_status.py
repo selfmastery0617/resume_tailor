@@ -18,7 +18,16 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("jobs", sa.Column("date_added", sa.Date(), nullable=True))
+    # Guard against 0001_initial_schema having already created this column on
+    # a database built from scratch -- see the matching comment in
+    # 20260818_2323_add_jobs_skills.py. The backfill below is still safe to
+    # run either way: on a fresh database there are no rows yet, and on one
+    # where this migration is what actually added the column it behaves
+    # exactly as before.
+    bind = op.get_bind()
+    existing = {c["name"] for c in sa.inspect(bind).get_columns("jobs")}
+    if "date_added" not in existing:
+        op.add_column("jobs", sa.Column("date_added", sa.Date(), nullable=True))
 
     # Autogenerate sees columns, not CHECK bodies or partial index predicates,
     # so the rest is written by hand.
