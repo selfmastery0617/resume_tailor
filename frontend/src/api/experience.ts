@@ -20,6 +20,14 @@ export interface ExperienceResult {
   /** Resume headline written for this job; "" when unavailable. */
   title: string;
   titleSource: "deepseek" | "none";
+  /** Resume skill set written for this job, last in the DeepSeek chat;
+   *  [] when unavailable (the profile's own skills are used instead). */
+  skillSet: string[];
+  skillSetSource: "deepseek" | "none";
+  /** ChatGPT's categorization of skillSet, from the same revision pass that
+   *  handles bullets/summaries; [] when it never ran or didn't parse, in
+   *  which case skillSet renders as one uncategorized group instead. */
+  skillGroups: { category: string; skills: string[] }[];
   /** Prompts that shared this job's single DeepSeek chat; 0 = never connected. */
   deepseekTurns: number;
   search: { mode: "semantic" | "lexical"; model: string | null; detail: string | null };

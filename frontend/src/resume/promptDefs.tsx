@@ -38,6 +38,13 @@ export const COMPANY_SUMMARY_PLACEHOLDERS = [
   "bullets",
 ] as const;
 
+/** Mirrors SKILL_SET_PLACEHOLDERS in backend settings_service.py. */
+export const SKILL_SET_PLACEHOLDERS = [
+  "job_title",
+  "job_description",
+  "bullets",
+] as const;
+
 export function PlaceholderList({ tokens }: { tokens: readonly string[] }) {
   return (
     <>
@@ -57,7 +64,9 @@ export type PromptKey =
   | "companySummaryPrompt"
   | "summaryPrompt"
   | "titlePrompt"
+  | "skillSetPrompt"
   | "revisionPrompt"
+  | "keywordsPrompt"
   | "corpusPrompt";
 
 export interface PromptDef {
@@ -138,8 +147,23 @@ export const PROMPT_DEFS: PromptDef[] = [
     rows: 12,
   },
   {
+    key: "skillSetPrompt",
+    label: "6. Skill set prompt",
+    description: (
+      <>
+        Runs last in the DeepSeek chat, once the bullets, summary, and title
+        all exist, and writes the resume's skill set as a list. Positioned on
+        the resume wherever the template's own "skills" block is placed —
+        right after Summary by default. Placeholders:{" "}
+        <PlaceholderList tokens={SKILL_SET_PLACEHOLDERS} />.
+      </>
+    ),
+    placeholders: SKILL_SET_PLACEHOLDERS,
+    rows: 10,
+  },
+  {
     key: "revisionPrompt",
-    label: "6. Final revision prompt",
+    label: "7. Final revision prompt",
     description: (
       <>
         Runs last, in a new ChatGPT chat — the bullets, company summaries, and
@@ -154,11 +178,26 @@ export const PROMPT_DEFS: PromptDef[] = [
     rows: 10,
   },
   {
+    key: "keywordsPrompt",
+    label: "8. Keyword marking prompt",
+    description: (
+      <>
+        A second message in that SAME ChatGPT chat, right after the revision
+        reply — so it still has the revised text in context — asking it to
+        wrap the resume's main keywords in square brackets, like{" "}
+        <code>[REST]</code>. The PDF renders anything between square brackets
+        bold. No placeholders — like the revision prompt, this is pure style
+        instruction applied to the resume ChatGPT just gave you.
+      </>
+    ),
+    rows: 8,
+  },
+  {
     key: "corpusPrompt",
     label: "Database generation prompt",
     description: (
       <>
-        Stored, not sent — separate from the six above, and not part of
+        Stored, not sent — separate from the eight above, and not part of
         extraction. This is the prompt you paste into your AI tool to produce
         a <code>database.json</code>, kept here so the wording that produced
         a corpus is recorded beside it and you can start from the same
