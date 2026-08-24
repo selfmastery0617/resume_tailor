@@ -10,8 +10,11 @@ export interface AppSettings {
   summaryPrompt: string;
   /** Writes the resume headline, once the summary exists. */
   titlePrompt: string;
-  /** Runs last, in a fresh ChatGPT chat: revises the bullets and summary
-   *  DeepSeek just wrote. */
+  /** Writes one summary per role (Job 1, Job 2), right after that role's own
+   *  bullets, in the same DeepSeek chat. */
+  companySummaryPrompt: string;
+  /** Runs last, in a fresh ChatGPT chat: revises the bullets, company
+   *  summaries, and overall summary DeepSeek just wrote. */
   revisionPrompt: string;
   /** Drafts a profile's database.json from its experience. Not part of
    *  extraction — run on demand from the Profile tab. */

@@ -7,7 +7,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  createProfile,
   downloadResumePdf,
   fetchProfiles,
   fetchTemplateSettings,
@@ -15,6 +14,7 @@ import {
   resetTemplateSettings,
   saveTemplateSettings,
 } from "../api/templates";
+import { useActiveProfileSettings } from "../hooks/useActiveProfileSettings";
 import { ResumePreview } from "../components/ResumePreview";
 import { StyleEditor } from "../components/StyleEditor";
 import { SAMPLE_RESUME } from "../resume/sampleData";
@@ -46,7 +46,12 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const [systemDefaultStyle, setSystemDefaultStyle] = useState<ResumeStyle | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  // The shared active profile (see useActiveProfileSettings) -- this page has
+  // no profile selector of its own anymore, it just follows whatever's
+  // active on the Profile tab. "appSettings" to avoid colliding with the
+  // profile's own template settings below, also called `settings`.
+  const { settings: appSettings } = useActiveProfileSettings(active);
+  const activeProfileId = appSettings?.resumeProfile || profiles[0]?.id || null;
   const [settings, setSettings] = useState<ProfileTemplateSettings | null>(null);
 
   // Selection and style edits are local until saved, so browsing and tweaking
@@ -75,7 +80,6 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
         setTemplates(catalog.templates);
         setSystemDefaultStyle(catalog.systemDefaultStyle);
         setProfiles(profileList);
-        setActiveProfileId(profileList[0]?.id ?? null);
         // No profile yet -> sample mode is the only thing we can show.
         if (profileList.length === 0) setUseSample(true);
       } catch {
@@ -90,16 +94,13 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
   }, []);
 
   // Re-read profiles whenever this tab is shown, so content entered on the
-  // Profile tab appears here without a page reload.
+  // Profile tab appears here without a page reload. activeProfileId itself
+  // is derived (see above), not managed here.
   useEffect(() => {
     if (!active) return;
     (async () => {
       try {
-        const list = await fetchProfiles();
-        setProfiles(list);
-        setActiveProfileId((current) =>
-          current && list.some((p) => p.id === current) ? current : (list[0]?.id ?? null),
-        );
+        setProfiles(await fetchProfiles());
       } catch {
         /* leave the existing list in place on a transient failure */
       }
@@ -243,41 +244,16 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
     }
   };
 
-  const handleCreateProfile = async () => {
-    const name = window.prompt("Profile name", "My Resume");
-    if (!name) return;
-    try {
-      const created = await createProfile(name);
-      setProfiles((prev) => [...prev, created]);
-      setActiveProfileId(created.id);
-      setUseSample(false);
-    } catch {
-      setError("Could not create the profile.");
-    }
-  };
-
   if (loading) return <p>Loading templates…</p>;
 
   return (
     <div className="templates-page">
       <div className="templates-toolbar">
-        <label htmlFor="profile-select">Profile</label>
-        <select
-          id="profile-select"
-          value={activeProfileId ?? ""}
-          onChange={(event) => setActiveProfileId(event.target.value || null)}
-          disabled={profiles.length === 0}
-        >
-          {profiles.length === 0 && <option value="">No profiles yet</option>}
-          {profiles.map((profile) => (
-            <option key={profile.id} value={profile.id}>
-              {profile.name}
-            </option>
-          ))}
-        </select>
-        <button type="button" onClick={handleCreateProfile}>
-          New profile
-        </button>
+        {activeProfile && (
+          <span className="templates-active-profile">
+            Showing <strong>{activeProfile.name}</strong>
+          </span>
+        )}
 
         <label className="sample-toggle">
           <input
@@ -390,7 +366,10 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
         <aside className="style-pane" aria-label="Style editor" hidden={!showStyleEditor}>
           <h2 className="style-pane-title">Style</h2>
           {!activeProfileId && (
-            <p className="notice">Create a profile to save style changes.</p>
+            <p className="notice">
+              Create a profile on the <strong>Profile</strong> tab to save
+              style changes.
+            </p>
           )}
           {effectiveStyle && (
             <StyleEditor

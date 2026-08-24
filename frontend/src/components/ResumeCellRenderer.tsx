@@ -19,6 +19,7 @@ export interface ResumeGridContext {
    *  browser session the bulk run is already using. */
   bulkRunning: boolean;
   onGenerateResume: (job: Job) => void;
+  onOpenFolder: (job: Job) => void;
 }
 
 export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
@@ -96,6 +97,15 @@ export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
         >
           📄 {saved.fileName}
         </a>
+        <button
+          type="button"
+          className="resume-open-folder"
+          onClick={() => context.onOpenFolder(data)}
+          title={`Open the folder: ${saved.filePath}`}
+          aria-label="Open containing folder"
+        >
+          📂
+        </button>
         {!locked && (
           <button
             type="button"
