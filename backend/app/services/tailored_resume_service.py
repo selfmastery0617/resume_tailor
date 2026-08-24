@@ -20,7 +20,7 @@ from typing import Any
 
 from app.db import get_db
 from app.models import generated_documents, profiles, templates
-from app.schemas.resume import Experience, Profile, ResumeData
+from app.schemas.resume import Experience, Profile, ResumeData, Skill
 from app.services import experience_service, profile_service, resume_service, settings_service
 from app.services.pdf.filename import (
     build_job_folder_name,
@@ -181,6 +181,36 @@ def build_tailored_data(profile: Profile, experience: dict[str, Any]) -> ResumeD
     title = (experience.get("title") or "").strip()
     if title:
         data.profile.professionalTitle = title
+
+    # Same reasoning as summary/title: a job-tailored skill set wins over the
+    # profile's own static one, but only when there is one to use -- an empty
+    # list (DeepSeek unavailable) leaves the profile's skills in place rather
+    # than blanking the section. Where it renders is up to the template's own
+    # "skills" block placement, not this function.
+    #
+    # skillGroups is ChatGPT's categorization of skillSet (see
+    # _revise_with_chatgpt's step 7 in experience_service.py) -- real
+    # categories, so SkillsContentBlock/SkillsSection
+    # (frontend/src/resume/blocks.tsx) bold each one and put it on its own
+    # line. When ChatGPT never ran or its categorization didn't parse,
+    # skillGroups is empty and every skill falls into one uncategorized
+    # group instead (Skill.category's own "Other" default).
+    skill_groups = [
+        (str(group.get("category") or "").strip(), [str(s).strip() for s in (group.get("skills") or []) if str(s).strip()])
+        for group in (experience.get("skillGroups") or [])
+    ]
+    skill_groups = [(category, names) for category, names in skill_groups if category and names]
+
+    if skill_groups:
+        data.skills = [
+            Skill(id=f"tailored-skill-{i}-{j}", name=name, category=category)
+            for i, (category, names) in enumerate(skill_groups)
+            for j, name in enumerate(names)
+        ]
+    else:
+        skill_set = [s.strip() for s in (experience.get("skillSet") or []) if s.strip()]
+        if skill_set:
+            data.skills = [Skill(id=f"tailored-skill-{i}", name=name) for i, name in enumerate(skill_set)]
 
     return data
 

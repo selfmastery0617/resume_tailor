@@ -1,13 +1,17 @@
-"""ChatGPT session detection and single-shot prompting.
+"""ChatGPT session detection and prompting.
 
 Unlike DeepSeek — which keeps its bearer in localStorage — ChatGPT
 authenticates with an httpOnly session cookie, so "signed in" is detected from
 the cookie plus the composer being present rather than from localStorage.
 
 `ask()` mirrors DeepSeekService.ask()/_ask_sync() (deepseek/service.py): one
-prompt, one fresh chat, one browser launch per call — no multi-turn session is
-needed here, since the resume-revision pipeline sends everything (the
-content, then the instructions) as a single message. See
+prompt, one fresh chat, one browser launch per call.
+
+`ask_two_turns()` is the one exception: the resume-revision pipeline now
+follows its revision message with a second, in-the-same-chat message asking
+ChatGPT to mark the resume's main keywords — that needs the revised text
+still in context, so it cannot be a second, independent ask() call (which
+would open a brand-new chat with no memory of the first). See
 experience_service._revise_with_chatgpt().
 """
 
@@ -15,7 +19,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.services.deepseek.browser import PROFILE_DIR
 
@@ -73,6 +77,7 @@ __all__ = [
     "ASSISTANT_MESSAGE_SELECTOR",
     "is_signed_in",
     "ask",
+    "ask_two_turns",
     "ChatGPTError",
     "ChatGPTAuthError",
     "ChatGPTResponseError",
@@ -167,17 +172,35 @@ def reply_text(page: Any) -> str:
     return bubbles.last.inner_text().strip()
 
 
-def read_reply(page: Any) -> str:
+def bubble_count(page: Any) -> int:
+    return page.locator(ASSISTANT_MESSAGE_SELECTOR).count()
+
+
+def read_reply(page: Any, after: int = 0) -> str:
     """Wait for the streamed reply to settle, then return its text.
 
     ChatGPT streams tokens in, so there is no single 'done' event to await.
     Poll the last assistant bubble until its text stops growing.
+
+    `after` is how many assistant bubbles were already on screen before this
+    turn's message was sent — 0 for a single-shot chat (every call before
+    ask_two_turns existed), non-zero for a later turn in the same chat. A
+    previous turn's bubble is already finished and its text is already
+    stable, so without this, step 1 below ("wait for a reply to appear") can
+    read that old, unchanged bubble as if it just arrived, and step 2 can
+    then find it "stable" a moment later — returning the *previous* turn's
+    answer for this one. Waiting for the bubble *count* to grow past `after`
+    is what actually distinguishes them; text alone cannot.
     """
     started_at = time.monotonic()
 
-    # 1. Wait for a reply to appear at all.
+    # 1. Wait for a genuinely new reply to appear (bubble count grown past
+    # `after`) and start actually streaming text in (non-empty) -- a fresh
+    # bubble typically renders empty for a moment before tokens arrive, and
+    # without this second condition that instant would look "stable" the
+    # moment step 2 sees the same empty string twice in a row.
     while True:
-        current = reply_text(page)
+        current = reply_text(page) if bubble_count(page) > after else ""
         if current:
             break
         if time.monotonic() - started_at > REPLY_START_TIMEOUT_S:
@@ -240,9 +263,10 @@ def _ask_sync(message: str, headless: bool) -> str:
 async def ask(message: str, headless: bool | None = None) -> str:
     """Run one prompt in a fresh ChatGPT chat and return the reply.
 
-    Opening a brand-new chat each call (rather than reusing one, the way
-    DeepSeekConversation does across a job's several prompts) is deliberate
-    here: the resume revision this backs is one message, one reply, done.
+    Opens a brand-new chat every call — for a caller that needs a second
+    message to land in the *same* chat as the first, see ask_two_turns()
+    below instead; a second ask() call would start over with no memory of
+    the first.
     """
     if headless is None:
         headless = _env_flag("CHATGPT_HEADLESS", True)
@@ -251,3 +275,56 @@ async def ask(message: str, headless: bool | None = None) -> str:
     # on a worker thread on purpose, for the same Windows/--reload reasons.
     async with _get_prompt_lock():
         return await asyncio.to_thread(_ask_sync, message, headless)
+
+
+def _ask_two_turns_sync(
+    first_message: str,
+    build_second_message: Callable[[str], "str | None"],
+    headless: bool,
+) -> tuple[str, "str | None"]:
+    from app.services.deepseek import browser as browser_mod
+
+    with browser_mod.browser_context(headless=headless) as context:
+        page = browser_mod.first_page(context)
+        page.goto(
+            CHATGPT_ORIGIN, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until="domcontentloaded"
+        )
+        assert_logged_in(page)
+        send_message(page, first_message)
+        first_reply = read_reply(page)
+
+        # The caller decides, from the first reply's actual content, whether
+        # a follow-up is even worth sending (e.g. no point asking ChatGPT to
+        # mark keywords in a reply that didn't parse into usable bullets in
+        # the first place) -- returning None here skips the second turn.
+        second_message = build_second_message(first_reply)
+        if second_message is None:
+            return first_reply, None
+
+        before = bubble_count(page)
+        send_message(page, second_message)
+        second_reply = read_reply(page, after=before)
+        return first_reply, second_reply
+
+
+async def ask_two_turns(
+    first_message: str,
+    build_second_message: Callable[[str], "str | None"],
+    headless: bool | None = None,
+) -> tuple[str, "str | None"]:
+    """Two prompts in the SAME fresh ChatGPT chat, back to back.
+
+    Backs the resume pipeline's revision step: the first turn asks ChatGPT to
+    revise the bullets/summaries, and the second -- in the same chat, so it
+    still has that revised text in context rather than needing it pasted
+    again -- asks it to mark the resume's main keywords. `build_second_message`
+    receives the first turn's raw reply and returns the message to send next,
+    or None to skip the second turn entirely.
+    """
+    if headless is None:
+        headless = _env_flag("CHATGPT_HEADLESS", True)
+
+    async with _get_prompt_lock():
+        return await asyncio.to_thread(
+            _ask_two_turns_sync, first_message, build_second_message, headless
+        )

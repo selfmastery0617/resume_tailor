@@ -372,13 +372,21 @@ def _deterministic_bullets(picked: Sequence[ScoredChallenge], count: int) -> lis
 
 
 def _parse_bullets(reply: str, wanted: int) -> list[str]:
-    """Pull bullet lines out of a model reply, tolerating numbering/markers."""
+    """Pull bullet lines out of a model reply, tolerating numbering/markers.
+
+    The marker strip requires trailing whitespace (\\s+, not \\s*) so it
+    can't mistake a leading "*" that isn't actually a bullet marker for one
+    (e.g. a stray asterisk right up against the first word) -- a real
+    "- "/"* " marker always has a space after it. Keywords are marked with
+    [brackets] (see _revise_with_chatgpt), which this strip never touches at
+    all since "[" was never one of the marker characters.
+    """
     lines = []
     for raw in (reply or "").splitlines():
         line = raw.strip()
         if not line:
             continue
-        line = re.sub(r"^[-*•●◦▪▸]\s*", "", line)
+        line = re.sub(r"^[-*•●◦▪▸]\s+", "", line)
         line = re.sub(r"^\d+[.)]\s*", "", line)
         # Skip headings the model may add ("Job 1:", "Bullets:").
         if len(line) < 25 and line.endswith(":"):
@@ -601,7 +609,10 @@ def _clean_summary(reply: str) -> str:
         # label the model prefixed, keeping anything that followed on the line.
         if line.startswith("#"):
             continue
-        stripped = line.lstrip("*-• ").strip()
+        # Marker strip requires trailing whitespace, same reasoning as
+        # _parse_bullets: a real "- "/"* " marker has a space after it, a
+        # stray leading asterisk that isn't one doesn't.
+        stripped = re.sub(r"^[*\-•]+\s+", "", line)
         lowered = stripped.lower()
         for label in ("professional summary:", "summary:"):
             if lowered.startswith(label):
@@ -862,12 +873,107 @@ async def _generate_title(
     return "", "none"
 
 
+def _parse_skill_list(reply: str) -> list[str]:
+    """A comma- or newline-separated list of skills -> deduped names, in the
+    order the model gave them. Tolerant of either shape since the prompt
+    asks for comma-separated but a model asked for "a list" sometimes writes
+    one per line instead.
+    """
+    text = (reply or "").replace("**", "")
+    seen: set[str] = set()
+    skills: list[str] = []
+    for part in re.split(r"[,\n]", text):
+        name = part.strip().strip("-*•").strip()
+        # Drop a "Skills:" label the model may prefix, and anything
+        # implausibly long to be a single skill (a stray sentence, not a list).
+        if name.lower().startswith("skills:"):
+            name = name[len("skills:"):].strip()
+        if not name or len(name) > 60:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        skills.append(name)
+    return skills
+
+
+async def _generate_skill_set(
+    chat: "DeepSeekConversation | None",
+    job1: JobSelection,
+    job2: JobSelection,
+    job_description: str,
+    job_title: str,
+) -> tuple[list[str], str]:
+    """Step 6, the DeepSeek chat's last step: the resume's skill set, written
+    from the bullets that now exist, before the chat closes and hands off to
+    ChatGPT. Where it lands on the rendered resume is up to the template's
+    own "skills" block placement, not this function.
+
+    Returns (skills, source) where source is 'deepseek' or 'none'. Like the
+    summary and title, there is no deterministic fallback: a skill set is a
+    claim about the candidate, and composing one from a template would be
+    inventing it. When DeepSeek is unavailable the resume keeps the
+    profile's own skills (see build_tailored_data in
+    tailored_resume_service.py).
+    """
+    from app.services import settings_service
+
+    bullets = [*job2.bullets, *job1.bullets]
+    if not bullets:
+        return [], "none"
+
+    template = (settings_service.get_settings().get("skillSetPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_SKILL_SET_PROMPT
+
+    prompt = settings_service.render_template(
+        template,
+        {
+            "job_title": job_title or "this role",
+            "job_description": job_description[:4000],
+            "bullets": "\n".join(f"- {b}" for b in bullets),
+        },
+    )
+
+    progress.emit("skillSet", "Writing the resume skill set…", level="step")
+
+    if chat is None:
+        progress.emit(
+            "skillSet",
+            "DeepSeek unavailable — keeping the profile's own skills",
+            level="warn",
+        )
+        return [], "none"
+
+    try:
+        skills = _parse_skill_list(await chat.ask(prompt))
+        if skills:
+            progress.emit(
+                "skillSet",
+                f"Skill set written ({len(skills)} skills)",
+                level="result",
+                preview=", ".join(skills),
+            )
+            return skills, "deepseek"
+        progress.emit("skillSet", "DeepSeek returned an empty skill set", level="warn")
+    except Exception as exc:  # noqa: BLE001 - provider unavailable
+        progress.emit(
+            "skillSet",
+            f"Skill set generation failed ({type(exc).__name__}) — "
+            "keeping the profile's own skills",
+            level="warn",
+        )
+    return [], "none"
+
+
 def _build_revision_message(
     job1_bullets: Sequence[str],
     job2_bullets: Sequence[str],
     job1_company_summary: str,
     job2_company_summary: str,
     summary: str,
+    skill_set: Sequence[str],
     revision_prompt: str,
 ) -> str:
     """One message: the resume content, then the user's revision instructions,
@@ -875,6 +981,13 @@ def _build_revision_message(
     back out. Mirrors the existing precedent in _extract_skills_and_mission()
     of appending structured, non-editable content around a user-editable
     template, rather than substituting placeholders into it.
+
+    The skill set is sent as DeepSeek wrote it -- a flat list -- and ChatGPT
+    is asked to organize it into categories. The resume renders each
+    category's name bold with its own line break (SkillsContentBlock/
+    SkillsSection in frontend/src/resume/blocks.tsx already do this for any
+    Skill with a real `category`), so categorizing here is what actually
+    produces that, not a text markup convention.
     """
     content = (
         "Here is my resume content.\n\n"
@@ -884,56 +997,106 @@ def _build_revision_message(
         + f"\n\nJob 2 ({len(job2_bullets)} bullets):\n"
         + "\n".join(f"- {b}" for b in job2_bullets)
         + f"\n\nJob 2 Company Summary:\n{job2_company_summary}"
-        + f"\n\nSummary:\n{summary}\n\n---\n\n"
+        + f"\n\nSummary:\n{summary}"
+        + f"\n\nSkill Set:\n{', '.join(skill_set)}\n\n---\n\n"
     )
     format_request = (
         "\n\nReply with the revised version in exactly this format, and "
         "nothing else (no preamble, no explanation) — keep exactly "
         f"{len(job1_bullets)} bullets in Job 1 and exactly {len(job2_bullets)} "
-        "in Job 2:\n\nJob 1:\n- revised bullet\n- revised bullet\n...\n\n"
-        "Job 1 Company Summary:\n...\n\nJob 2:\n- revised bullet\n...\n\n"
-        "Job 2 Company Summary:\n...\n\nSummary:\n..."
+        "in Job 2. For the skill set, sort every skill into 3-6 sensible "
+        "categories (e.g. Languages, Frameworks, Cloud & Infrastructure) — "
+        "use only the skills given, do not add or drop any, and do not "
+        "invent a skill that was not in the list:\n\nJob 1:\n- revised "
+        "bullet\n- revised bullet\n...\n\nJob 1 Company Summary:\n...\n\n"
+        "Job 2:\n- revised bullet\n...\n\nJob 2 Company Summary:\n...\n\n"
+        "Summary:\n...\n\nSkill Set:\nCategory: skill, skill, skill\n"
+        "Category: skill, skill\n..."
     )
     return content + revision_prompt + format_request
 
 
+def _build_keyword_message(job1_count: int, job2_count: int, keywords_prompt: str) -> str:
+    """The revision step's follow-up, sent in the SAME chat right after the
+    revision reply -- so unlike _build_revision_message, this does not repeat
+    the resume content: ChatGPT still has the text it just wrote in context.
+    Ends with the same kind of fixed, parseable format request, reusing the
+    revision reply's exact five-section shape so the caller can run the same
+    parser on both replies.
+    """
+    format_request = (
+        "\n\nReply with the same text you just gave me, in exactly this "
+        "format and nothing else (no preamble, no explanation) — keep "
+        f"exactly {job1_count} bullets in Job 1 and exactly {job2_count} in "
+        "Job 2, with every keyword now wrapped in square brackets and "
+        "nothing else changed:\n\nJob 1:\n- bullet with [keywords] marked\n"
+        "...\n\nJob 1 Company Summary:\n...\n\nJob 2:\n- bullet with "
+        "[keywords] marked\n...\n\nJob 2 Company Summary:\n...\n\nSummary:\n..."
+    )
+    return keywords_prompt + format_request
+
+
 # Tolerant of "Job 1:" / "Job1" / "JOB 1 -", any case, any amount of
 # whitespace between label and colon — the model is asked for this exact
-# shape, but chat models still drift on punctuation. The two company-summary
-# sections are wrapped in their own optional (?:...)? group: they're new and
-# easier for a model to drop from a now-five-section format than the original
-# three ever were, and if that happens this must still match on job1/job2/
-# summary alone rather than fail the whole reply over two missing extras.
+# shape, but chat models still drift on punctuation. The company-summary and
+# skill-set sections are each wrapped in their own optional (?:...)? group:
+# they're newer and easier for a model to drop from a now-six-section format
+# than the original three ever were, and if that happens this must still
+# match on job1/job2/summary alone rather than fail the whole reply over
+# missing extras. `summary` itself is non-greedy (.*?, not .*) precisely so
+# it stops before a following Skill Set section instead of swallowing it --
+# with nothing after it, it still reaches right to the end of the text.
 _REVISION_SECTION_RE = re.compile(
     r"job\s*1\s*[:\-]?\s*(?P<job1>.*?)\s*"
     r"(?:job\s*1\s*company\s*summary\s*[:\-]?\s*(?P<job1_summary>.*?)\s*)?"
     r"job\s*2\s*[:\-]?\s*(?P<job2>.*?)\s*"
     r"(?:job\s*2\s*company\s*summary\s*[:\-]?\s*(?P<job2_summary>.*?)\s*)?"
-    r"summary\s*[:\-]?\s*(?P<summary>.*)",
+    r"summary\s*[:\-]?\s*(?P<summary>.*?)\s*"
+    r"(?:skill\s*set\s*[:\-]?\s*(?P<skill_set>.*))?$",
     re.IGNORECASE | re.DOTALL,
 )
 
 
+def _parse_skill_categories(text: str) -> list[tuple[str, list[str]]]:
+    """"Category: skill, skill, skill" lines -> [(category, [skill, ...])].
+
+    Skips any line without a colon (a heading or blank line the model added
+    despite being asked not to) rather than failing the whole section over
+    it -- same tolerant spirit as _parse_bullets.
+    """
+    groups: list[tuple[str, list[str]]] = []
+    for raw in (text or "").replace("**", "").splitlines():
+        line = re.sub(r"^[-*•●◦▪▸]\s+", "", raw.strip())
+        if not line or ":" not in line:
+            continue
+        category, _, rest = line.partition(":")
+        category = category.strip()
+        skills = [s.strip() for s in rest.split(",") if s.strip()]
+        if category and skills:
+            groups.append((category, skills))
+    return groups
+
+
 def _parse_revision_reply(
     reply: str, job1_count: int, job2_count: int
-) -> tuple[list[str], list[str], str, str, str] | None:
+) -> tuple[list[str], list[str], str, str, str, list[tuple[str, list[str]]]] | None:
     """Split a revision reply into (job1 bullets, job2 bullets, job1 company
-    summary, job2 company summary, summary), or None when there isn't enough
-    usable content to trust.
+    summary, job2 company summary, summary, skill categories), or None when
+    there isn't enough usable content to trust.
 
     Locates the labeled sections, then reuses the existing tolerant cleaners —
     _parse_bullets() and _clean_summary() — rather than reimplementing
     bullet/summary cleanup for a second time.
 
     Acceptance is still gated only on job1/job2 bullets and the overall
-    summary, exactly as before this function grew two more fields: those three
+    summary, exactly as before this function grew more fields: those three
     are the resume's core content, and the caller labels the whole run
-    "chatgpt" based on them. The company summaries are extracted opportunistically
-    alongside — a model that skips or garbles one of them (they're new, and a
-    model can drift on a five-section format more easily than a three-section
-    one) shouldn't discard an otherwise good bullets+summary revision. The
-    caller applies each company summary only when it actually came back
-    non-empty, keeping whatever it had otherwise.
+    "chatgpt" based on them. The company summaries and skill categories are
+    extracted opportunistically alongside — a model that skips or garbles one
+    of them (they're newer, and a model can drift on a six-section format
+    more easily than a three-section one) shouldn't discard an otherwise good
+    bullets+summary revision. The caller applies each one only when it
+    actually came back non-empty, keeping whatever it had otherwise.
     """
     text = (reply or "").replace("**", "")
     match = _REVISION_SECTION_RE.search(text)
@@ -945,6 +1108,7 @@ def _parse_revision_reply(
     job1_company_summary = _clean_summary(match.group("job1_summary"))
     job2_company_summary = _clean_summary(match.group("job2_summary"))
     summary = _clean_summary(match.group("summary"))
+    skill_groups = _parse_skill_categories(match.group("skill_set") or "")
 
     # Same acceptance bar _generate_bullets() already uses (line ~437): enough
     # of what was asked for to trust, not necessarily every last one — there
@@ -954,7 +1118,7 @@ def _parse_revision_reply(
     if not (job1_ok and job2_ok and summary):
         return None
 
-    return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary
+    return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, skill_groups
 
 
 async def _revise_with_chatgpt(
@@ -963,23 +1127,34 @@ async def _revise_with_chatgpt(
     job1_company_summary: str,
     job2_company_summary: str,
     summary: str,
-) -> tuple[list[str], list[str], str, str, str, bool]:
-    """Step 6, the pipeline's last step: a fresh ChatGPT chat revises the
-    bullets, company summaries, and overall summary DeepSeek just wrote.
+    skill_set: list[str],
+) -> tuple[list[str], list[str], str, str, str, list[tuple[str, list[str]]], bool]:
+    """Step 7, the pipeline's last step: a fresh ChatGPT chat revises the
+    bullets, company summaries, overall summary, and skill set DeepSeek just
+    wrote — sorting the flat skill list into categories along the way — then
+    a second message in that SAME chat (step 7b) asks it to mark the main
+    keywords by wrapping them in [square brackets] -- the PDF renders those
+    bold (RichText/parseBold in frontend/src/resume/format.ts).
 
     Returns (job1_bullets, job2_bullets, job1_company_summary,
-    job2_company_summary, summary, applied) — applied=False whenever ChatGPT
-    isn't connected, the call fails, or the reply doesn't parse into
-    something usable, in which case every field comes back unchanged. Like
-    every other step here, this must never fail the extraction: a missing or
-    broken revision just means the resume keeps DeepSeek's own text.
+    job2_company_summary, summary, skill_groups, applied) — applied=False
+    whenever ChatGPT isn't connected, the call fails, or the revision reply
+    doesn't parse into something usable, in which case every field comes
+    back unchanged (skill_groups empty, meaning "stay flat, uncategorized" —
+    see build_tailored_data in tailored_resume_service.py). Like every other
+    step here, this must never fail the extraction: a missing or broken
+    revision just means the resume keeps DeepSeek's own text.
 
     The bullets and overall summary are still accepted or reverted together —
     generator is one value for the whole run, so a half-revised resume must
-    not be labeled "chatgpt". Each company summary is applied independently
-    of that (see _parse_revision_reply's docstring): a model that garbles the
-    newer, extra company-summary sections shouldn't cost the resume an
-    otherwise good bullets+summary revision, or vice versa.
+    not be labeled "chatgpt". Each company summary and the skill
+    categorization are applied independently of that (see
+    _parse_revision_reply's docstring): a model that garbles one of the
+    newer sections shouldn't cost the resume an otherwise good
+    bullets+summary revision, or vice versa. The keyword pass is applied the
+    same way: if it fails or doesn't parse, the run keeps the (still
+    successfully revised, still applied=True) un-marked text rather than
+    reverting the whole revision over the keyword step alone.
 
     Must run after _chat_session()'s conversation has fully closed: ChatGPT
     and DeepSeek share one browser profile, and that block holds the
@@ -987,7 +1162,7 @@ async def _revise_with_chatgpt(
     wait forever for a lock that only releases once the outer block exits.
     """
     if not job1_bullets or not job2_bullets or not summary:
-        return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, False
+        return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, [], False
 
     from app.services import chatgpt, chatgpt_session, settings_service
 
@@ -1000,7 +1175,7 @@ async def _revise_with_chatgpt(
             "keeping DeepSeek's bullets and summary",
             level="warn",
         )
-        return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, False
+        return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, [], False
 
     if not status.get("connected"):
         progress.emit(
@@ -1010,15 +1185,31 @@ async def _revise_with_chatgpt(
             "revision pass.",
             level="info",
         )
-        return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, False
+        return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, [], False
 
-    template = (settings_service.get_settings().get("revisionPrompt") or "").strip()
+    settings = settings_service.get_settings()
+
+    template = (settings.get("revisionPrompt") or "").strip()
     if not template:
         template = settings_service.DEFAULT_REVISION_PROMPT
 
     message = _build_revision_message(
-        job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, template
+        job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, skill_set, template
     )
+
+    keywords_template = (settings.get("keywordsPrompt") or "").strip()
+    if not keywords_template:
+        keywords_template = settings_service.DEFAULT_KEYWORDS_PROMPT
+
+    def build_keyword_followup(first_reply: str) -> str | None:
+        # Only worth asking to mark keywords in a reply that itself parsed
+        # into something usable -- nothing sensible to mark otherwise, and
+        # the outer parse below will already revert to DeepSeek's version.
+        parsed = _parse_revision_reply(first_reply, len(job1_bullets), len(job2_bullets))
+        if parsed is None:
+            return None
+        marked_job1, marked_job2, *_ = parsed
+        return _build_keyword_message(len(marked_job1), len(marked_job2), keywords_template)
 
     progress.emit(
         "revision",
@@ -1027,30 +1218,51 @@ async def _revise_with_chatgpt(
     )
 
     try:
-        reply = await chatgpt.ask(message)
+        reply, keyword_reply = await chatgpt.ask_two_turns(message, build_keyword_followup)
         parsed = _parse_revision_reply(reply, len(job1_bullets), len(job2_bullets))
-        if parsed is not None:
-            new_job1, new_job2, new_job1_summary, new_job2_summary, new_summary = parsed
+        if parsed is None:
             progress.emit(
                 "revision",
-                f"ChatGPT revised {len(new_job1)} + {len(new_job2)} bullets, "
-                "the company summaries, and the summary",
-                level="result",
+                "ChatGPT's revision did not parse into usable bullets and a "
+                "summary — keeping DeepSeek's version",
+                level="warn",
             )
-            return (
-                new_job1,
-                new_job2,
-                new_job1_summary or job1_company_summary,
-                new_job2_summary or job2_company_summary,
-                new_summary,
-                True,
-            )
+            return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, [], False
+
+        new_job1, new_job2, new_job1_summary, new_job2_summary, new_summary, skill_groups = parsed
+        new_job1_summary = new_job1_summary or job1_company_summary
+        new_job2_summary = new_job2_summary or job2_company_summary
+
+        keywords_marked = False
+        if keyword_reply:
+            keyword_parsed = _parse_revision_reply(keyword_reply, len(new_job1), len(new_job2))
+            if keyword_parsed is not None:
+                marked_job1, marked_job2, marked_job1_summary, marked_job2_summary, marked_summary, _ = (
+                    keyword_parsed
+                )
+                new_job1, new_job2 = marked_job1, marked_job2
+                new_job1_summary = marked_job1_summary or new_job1_summary
+                new_job2_summary = marked_job2_summary or new_job2_summary
+                new_summary = marked_summary or new_summary
+                keywords_marked = True
+            else:
+                progress.emit(
+                    "revision",
+                    "Keyword marking did not parse — keeping the revision "
+                    "without keywords marked",
+                    level="warn",
+                )
+
         progress.emit(
             "revision",
-            "ChatGPT's revision did not parse into usable bullets and a "
-            "summary — keeping DeepSeek's version",
-            level="warn",
+            f"ChatGPT revised {len(new_job1)} + {len(new_job2)} bullets, "
+            "the company summaries, the summary"
+            + (f", and sorted {sum(len(s) for _, s in skill_groups)} skills into "
+               f"{len(skill_groups)} categories" if skill_groups else "")
+            + (", with main keywords marked" if keywords_marked else ""),
+            level="result",
         )
+        return new_job1, new_job2, new_job1_summary, new_job2_summary, new_summary, skill_groups, True
     except Exception as exc:  # noqa: BLE001 - provider unavailable or reply timed out
         progress.emit(
             "revision",
@@ -1059,7 +1271,7 @@ async def _revise_with_chatgpt(
             level="warn",
         )
 
-    return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, False
+    return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, [], False
 
 
 async def extract_experience(
@@ -1146,9 +1358,15 @@ async def extract_experience(
             chat, job1_sel, job2_sel, summary, current_title, job_description, job_title
         )
 
+        # Step 6: the skill set, written last in this chat, before handoff to
+        # ChatGPT for revision (step 7 below, once the chat has closed).
+        skill_set, skill_set_source = await _generate_skill_set(
+            chat, job1_sel, job2_sel, job_description, job_title
+        )
+
         turns = chat.turns if chat else 0
 
-    # Step 6, run only now that DeepSeek's chat has fully closed and released
+    # Step 7, run only now that DeepSeek's chat has fully closed and released
     # the shared browser profile — see the docstring on _revise_with_chatgpt.
     (
         job1_sel.bullets,
@@ -1156,6 +1374,7 @@ async def extract_experience(
         job1_sel.company_summary,
         job2_sel.company_summary,
         summary,
+        skill_groups,
         revised,
     ) = await _revise_with_chatgpt(
         job1_sel.bullets,
@@ -1163,6 +1382,7 @@ async def extract_experience(
         job1_sel.company_summary,
         job2_sel.company_summary,
         summary,
+        skill_set,
     )
 
     progress.emit(
@@ -1195,11 +1415,18 @@ async def extract_experience(
         "summarySource": summary_source,
         "title": generated_title,
         "titleSource": title_source,
+        "skillSet": skill_set,
+        "skillSetSource": skill_set_source,
+        # ChatGPT's categorization of skill_set, or [] when it never ran or
+        # didn't parse -- see build_tailored_data() in
+        # tailored_resume_service.py, which falls back to the flat skillSet
+        # (one uncategorized group) when this is empty.
+        "skillGroups": [{"category": c, "skills": s} for c, s in skill_groups],
         "search": vector_search.backend(),
         # 'fallback' on either half means the AI provider wasn't used, which the
         # UI surfaces rather than passing template text off as generated.
         # 'chatgpt' overrides both: it means the text actually on the resume
-        # was revised by ChatGPT in step 6, regardless of which tier produced
+        # was revised by ChatGPT in step 7, regardless of which tier produced
         # the bullets it revised.
         "generator": (
             "chatgpt" if revised else ("deepseek" if gen1 == gen2 == "deepseek" else "fallback")
@@ -1246,6 +1473,14 @@ def _store_run(conn, job_row, payload: dict[str, Any]) -> None:
             state="succeeded",
             summary=payload.get("summary") or "",
             generated_title=payload.get("title") or "",
+            # JSON, not plain comma-joined: needs to carry both the flat
+            # DeepSeek list and ChatGPT's (possibly absent) categorization.
+            skill_set=json.dumps(
+                {
+                    "flat": payload.get("skillSet") or [],
+                    "groups": payload.get("skillGroups") or [],
+                }
+            ),
             generator=payload.get("generator") or "fallback",
             search_mode=search.get("mode") or "lexical",
             search_model=search.get("model") or "",
@@ -1322,6 +1557,15 @@ def _load_run(conn, job_row) -> dict[str, Any] | None:
     if run is None:
         return None
 
+    try:
+        skill_data = json.loads(run.skill_set) if run.skill_set else {}
+    except ValueError:
+        # Pre-dates the categorization feature: skill_set was a plain
+        # comma-joined list rather than JSON.
+        skill_data = {"flat": [s for s in run.skill_set.split(",") if s]} if run.skill_set else {}
+    flat_skills = skill_data.get("flat") or []
+    skill_groups = skill_data.get("groups") or []
+
     payload: dict[str, Any] = {
         "job1": {},
         "job2": {},
@@ -1329,6 +1573,9 @@ def _load_run(conn, job_row) -> dict[str, Any] | None:
         "summarySource": "deepseek" if run.summary else "none",
         "title": run.generated_title,
         "titleSource": "deepseek" if run.generated_title else "none",
+        "skillSet": flat_skills,
+        "skillSetSource": "deepseek" if flat_skills else "none",
+        "skillGroups": skill_groups,
         "search": {"mode": run.search_mode, "model": run.search_model or None,
                    "detail": None},
         "generator": run.generator,

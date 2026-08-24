@@ -105,6 +105,34 @@ TITLE_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
+# Runs last in the DeepSeek chat, after the title -- before handoff to
+# ChatGPT for revision (see _revise_with_chatgpt). Where it lands on the
+# rendered resume is up to the template's own "skills" block placement
+# (default_layout() in backend/app/schemas/layout.py puts it right after
+# Summary), not this prompt.
+DEFAULT_SKILL_SET_PROMPT = """Write the skills section for this resume, as a list.
+
+Rules:
+- Output only a comma-separated list of skills. No heading, no numbering, no explanation.
+- Use only skills the experience below actually supports. Do not invent skills
+  that were not mentioned there.
+- Prioritize skills that match the target job description, most relevant first.
+- List 8-15 skills.
+
+Target role: {job_title}
+
+Target job description:
+{job_description}
+
+Experience just written for this resume:
+{bullets}"""
+
+SKILL_SET_PLACEHOLDERS: tuple[str, ...] = (
+    "job_title",
+    "job_description",
+    "bullets",
+)
+
 # Runs right after that job's bullets are written, in the same chat, once per
 # role (Job 1, then Job 2) -- so each one describes only that company/product,
 # not the candidate as a whole the way the resume summary does.
@@ -136,10 +164,12 @@ COMPANY_SUMMARY_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
-# Step 6, the pipeline's last step: a fresh ChatGPT chat revises the bullets
-# and summary DeepSeek just wrote. No placeholders — the content is handed
-# over separately (see _build_revision_message in experience_service.py), so
-# this is pure style instruction, applied to "the resume I just gave you".
+# Step 7, the pipeline's last step: a fresh ChatGPT chat revises the bullets,
+# summary, and skill set DeepSeek just wrote. No placeholders — the content
+# is handed over separately (see _build_revision_message in
+# experience_service.py, which also appends the fixed, non-editable request
+# to sort the skill set into categories), so this is pure style instruction,
+# applied to "the resume I just gave you".
 DEFAULT_REVISION_PROMPT = """Revise this resume.
 
 - Keep a FAANG-style writing approach.
@@ -148,7 +178,25 @@ DEFAULT_REVISION_PROMPT = """Revise this resume.
 - Make the bullets more realistic where needed.
 - Naturally incorporate relevant technical skills into each bullet.
 - Keep each bullet 2–3 lines long.
+- Group the skill set into clear, conventional categories (e.g. Languages,
+  Frameworks, Cloud & Infrastructure) rather than one long undifferentiated list.
 - Write in natural, native English."""
+
+# Step 7b: a second message in the SAME ChatGPT chat as the revision above --
+# not a fresh chat, so it still has the revised text in context (see
+# _build_keyword_message in experience_service.py, which appends the reply
+# format request; this half is pure style instruction). The [bracket] marker
+# is what the PDF renderer looks for to bold a word (RichText/parseBold in
+# frontend/src/resume/format.ts).
+DEFAULT_KEYWORDS_PROMPT = """Now mark the main keywords in the resume you just gave me.
+
+- Wrap each important keyword or phrase in square brackets, like [REST API].
+  Skills, technologies, tools, frameworks, methodologies, and other terms a
+  recruiter or an ATS would search for all count.
+- Do not change any wording, and do not add or remove anything — only add the
+  bracket markers around words or phrases that are already there.
+- Do not use asterisks, double asterisks, or any other markdown.
+- Mark at most 2-4 keywords per bullet. Marking too much makes nothing stand out."""
 
 # The prompt used to produce a profile's database.json. Stored only — the
 # application never sends it. It is kept here so the wording that produced a
@@ -219,11 +267,16 @@ DEFAULTS: dict[str, Any] = {
     "summaryPrompt": DEFAULT_SUMMARY_PROMPT,
     # Step 5: the headline title, written once the summary exists.
     "titlePrompt": DEFAULT_TITLE_PROMPT,
-    # Steps 4a/4b: one summary per role (Job 1, Job 2), introducing that
+    # Steps 3a/3b: one summary per role (Job 1, Job 2), introducing that
     # company/product above its bullets.
     "companySummaryPrompt": DEFAULT_COMPANY_SUMMARY_PROMPT,
-    # Step 6: a fresh ChatGPT chat revises the bullets and summary.
+    # Step 6: the resume's skill set, written last in the DeepSeek chat,
+    # before handoff to ChatGPT.
+    "skillSetPrompt": DEFAULT_SKILL_SET_PROMPT,
+    # Step 7: a fresh ChatGPT chat revises the bullets and summary.
     "revisionPrompt": DEFAULT_REVISION_PROMPT,
+    # Step 7b: a second message in that same ChatGPT chat, marking keywords.
+    "keywordsPrompt": DEFAULT_KEYWORDS_PROMPT,
     # Not part of extraction: builds a profile's database.json on demand.
     "corpusPrompt": DEFAULT_CORPUS_PROMPT,
     "outputFolder": "",
@@ -279,7 +332,9 @@ PROMPT_KEYS: dict[str, str] = {
     "summaryPrompt": "summary",
     "titlePrompt": "title",
     "companySummaryPrompt": "companysummary",
+    "skillSetPrompt": "skillset",
     "revisionPrompt": "revision",
+    "keywordsPrompt": "keywords",
     "corpusPrompt": "corpus",
 }
 

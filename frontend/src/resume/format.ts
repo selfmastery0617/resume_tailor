@@ -7,14 +7,20 @@
 
 import type { Experience, ResumeStyle, Skill } from "./types";
 
-/** Split **bold** spans into React-safe segments (RG-FR-004).
+/** Split **bold** and [bold] spans into React-safe segments (RG-FR-004).
+ *
+ *  Two markers, one meaning: **double asterisks** is legacy markdown-style
+ *  bold; [square brackets] is what ChatGPT's keyword-marking pass now writes
+ *  (see experience_service._revise_with_chatgpt's step 6b) to bold a
+ *  resume's main keywords. The double-asterisk alternative is tried first at
+ *  each position so the two never interfere with each other.
  *
  *  Returns plain segments rather than HTML so there is no injection path.
  */
 export function parseBold(text: string): { text: string; bold: boolean }[] {
   if (!text) return [];
   const segments: { text: string; bold: boolean }[] = [];
-  const pattern = /\*\*(.+?)\*\*/g;
+  const pattern = /\*\*(.+?)\*\*|\[(.+?)\]/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -22,7 +28,7 @@ export function parseBold(text: string): { text: string; bold: boolean }[] {
     if (match.index > lastIndex) {
       segments.push({ text: text.slice(lastIndex, match.index), bold: false });
     }
-    segments.push({ text: match[1], bold: true });
+    segments.push({ text: match[1] ?? match[2], bold: true });
     lastIndex = match.index + match[0].length;
   }
   if (lastIndex < text.length) {
@@ -39,7 +45,13 @@ export function toBullets(description: string): string[] {
   if (!description) return [];
   return description
     .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*[-•●◦*▪▸]\s*/, "").trim())
+    // \s+ (not \s*) after the marker, so a stray leading "*" that isn't
+    // actually a bullet marker (e.g. sitting right against the first word)
+    // is left alone rather than stripped -- a real "- "/"* " marker always
+    // has a space after it. Keyword markers are [brackets] (see parseBold
+    // above), which this never touches at all since "[" was never one of
+    // the marker characters here.
+    .map((line) => line.replace(/^\s*[-•●◦*▪▸]\s+/, "").trim())
     .filter((line) => line.length > 0);
 }
 

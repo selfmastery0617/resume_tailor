@@ -282,17 +282,22 @@ def upsert_many(listings: Iterable[JobListing], source: str = "jobright") -> lis
 
 
 def list_jobs() -> list[dict[str, Any]]:
-    """Every stored job for the active profile. Not-yet-applied first."""
+    """Every stored job for the active profile, oldest first.
+
+    Ordered by first_seen_at -- a stable stamp set once at insertion, never
+    touched afterward -- rather than by any editable field. Sorting by
+    company or application_status used to mean a row visibly jumped to a new
+    position the moment its company or status was edited (most noticeably
+    right after pasting a batch of jobs in), which read as the table
+    "auto-sorting" on its own. Order stays exactly as-imported/added now,
+    regardless of what gets edited into a row afterward.
+    """
     with get_db() as conn:
         profile_id = active_profile_id(conn)
         rows = conn.execute(
             select(jobs)
             .where(jobs.c.profile_id == profile_id, jobs.c.archived_at.is_(None))
-            .order_by(
-                (jobs.c.application_status == "applied"),
-                jobs.c.last_seen_at.desc(),
-                jobs.c.company,
-            )
+            .order_by(jobs.c.first_seen_at)
         ).all()
     return [_row_to_dict(row) for row in rows]
 

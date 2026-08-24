@@ -13,9 +13,16 @@ export interface AppSettings {
   /** Writes one summary per role (Job 1, Job 2), right after that role's own
    *  bullets, in the same DeepSeek chat. */
   companySummaryPrompt: string;
+  /** Writes the resume's skill set, last in the DeepSeek chat, before
+   *  handoff to ChatGPT. Positioned on the resume wherever the template's
+   *  own "skills" block is placed (right after Summary by default). */
+  skillSetPrompt: string;
   /** Runs last, in a fresh ChatGPT chat: revises the bullets, company
    *  summaries, and overall summary DeepSeek just wrote. */
   revisionPrompt: string;
+  /** A second message in that SAME ChatGPT chat, marking main keywords by
+   *  wrapping them in [square brackets] -- the PDF renders those bold. */
+  keywordsPrompt: string;
   /** Drafts a profile's database.json from its experience. Not part of
    *  extraction — run on demand from the Profile tab. */
   corpusPrompt: string;
