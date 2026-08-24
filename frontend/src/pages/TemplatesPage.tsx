@@ -58,7 +58,6 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
   // never write to the profile (TM-FR-013).
   const [selectedTemplateId, setSelectedTemplateId] = useState(DEFAULT_TEMPLATE_ID);
   const [draftOverrides, setDraftOverrides] = useState<Partial<ResumeStyle>>({});
-  const [useSample, setUseSample] = useState(false);
   const [showStyleEditor, setShowStyleEditor] = useState(true);
   const [showTemplateList, setShowTemplateList] = useState(true);
 
@@ -80,8 +79,6 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
         setTemplates(catalog.templates);
         setSystemDefaultStyle(catalog.systemDefaultStyle);
         setProfiles(profileList);
-        // No profile yet -> sample mode is the only thing we can show.
-        if (profileList.length === 0) setUseSample(true);
       } catch {
         if (!cancelled) setError("Could not load templates. Is the backend running on port 8000?");
       } finally {
@@ -142,8 +139,13 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
     } as ResumeStyle;
   }, [systemDefaultStyle, selectedTemplate, draftOverrides]);
 
-  const showingSample = useSample || !hasResumeContent(activeProfile);
-  const previewData = showingSample ? SAMPLE_RESUME : (activeProfile?.data ?? SAMPLE_RESUME);
+  // Always sample data here, deliberately: this pane is for judging a
+  // template/style against a *full* resume (every section populated, long
+  // bullet lists, several skills categories), which a real profile often
+  // isn't -- a sparse real profile would make a layout look broken when it
+  // isn't. Save/Reset/Download PDF below still act on the real active
+  // profile; only what's shown in this preview is fixed to the sample.
+  const previewData = SAMPLE_RESUME;
 
   const dirty =
     settings !== null &&
@@ -255,16 +257,6 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
           </span>
         )}
 
-        <label className="sample-toggle">
-          <input
-            type="checkbox"
-            checked={showingSample}
-            disabled={!hasResumeContent(activeProfile)}
-            onChange={(event) => setUseSample(event.target.checked)}
-          />
-          Use sample data
-        </label>
-
         <div className="templates-actions">
           {/* Both panels collapse so the preview can use the full width. */}
           <button
@@ -317,8 +309,8 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
       {notice && <p className="notice">{notice}</p>}
       {!hasResumeContent(activeProfile) && (
         <p className="notice">
-          This profile has no resume content yet, so the preview shows sample data.
-          Add your details on the <strong>Profile</strong> tab to enable PDF download.
+          This profile has no resume content yet. Add your details on the{" "}
+          <strong>Profile</strong> tab to enable PDF download.
         </p>
       )}
 
@@ -358,7 +350,7 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
               data={previewData}
               style={effectiveStyle}
               template={selectedTemplate}
-              isSample={showingSample}
+              isSample
             />
           )}
         </div>

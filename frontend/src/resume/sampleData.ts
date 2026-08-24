@@ -1,8 +1,13 @@
 /** Demonstration data.
  *
- *  US-TM-02 / TM-FR-009: sample data is only used when the user explicitly
- *  asks for it or no profile exists, and the UI must label it "Sample data".
- *  It must never silently stand in for a real profile.
+ *  Used unconditionally on the Templates and Builder pages (TM-FR-009's
+ *  labeling requirement still applies -- the preview always shows the
+ *  "Sample data" badge, see ResumePreview's isSample prop): judging a
+ *  template/style against a real profile is misleading when that profile is
+ *  sparse, since a thin section can make a layout look broken when it isn't.
+ *  This exists to exercise every section a template can have, so every
+ *  field here should stay populated -- an empty one is a gap in the fixture,
+ *  not a realistic case to represent.
  */
 
 import type { ResumeData } from "./types";
@@ -17,7 +22,7 @@ export const SAMPLE_RESUME: ResumeData = {
     city: "Austin",
     state: "TX",
     postal: "78701",
-    birthday: "",
+    birthday: "1990-05-14",
     linkedin: "linkedin.com/in/alexchen",
     website: "alexchen.dev",
     summary:

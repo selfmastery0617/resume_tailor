@@ -13,8 +13,7 @@ import {
   fetchDefaultLayout,
   updateTemplate,
 } from "../api/builder";
-import { fetchProfiles, fetchTemplates } from "../api/templates";
-import { useActiveProfileSettings } from "../hooks/useActiveProfileSettings";
+import { fetchTemplates } from "../api/templates";
 import { ResumePreview } from "../components/ResumePreview";
 import { APPROVED_FONTS } from "../resume/fonts";
 import type {
@@ -72,7 +71,7 @@ import {
 } from "../resume/layoutOps";
 import { PAPER_OPTIONS, pageGeometry } from "../resume/pageGeometry";
 import { SAMPLE_RESUME } from "../resume/sampleData";
-import type { Profile, ResumeStyle, TemplateDefinition } from "../resume/types";
+import type { ResumeStyle, TemplateDefinition } from "../resume/types";
 
 interface TemplateBuilderPageProps {
   active?: boolean;
@@ -81,12 +80,6 @@ interface TemplateBuilderPageProps {
 export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps) {
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const [systemStyle, setSystemStyle] = useState<ResumeStyle | null>(null);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
-  // The shared active profile (see useActiveProfileSettings) -- this page has
-  // no profile picker of its own, it previews with whatever's active on the
-  // Profile tab, same as Templates page.
-  const { settings: appSettings } = useActiveProfileSettings(active);
-  const profileId = appSettings?.resumeProfile || profiles[0]?.id || null;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<TemplateLayout | null>(null);
   const [saved, setSaved] = useState<TemplateLayout | null>(null);
@@ -94,7 +87,6 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
   const [savedStyle, setSavedStyle] = useState<Partial<ResumeStyle>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [profileWarning, setProfileWarning] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   const saveSequence = useRef(0);
@@ -110,32 +102,15 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
   }, [selectedId]);
 
   const reload = useCallback(async () => {
-    const [catalogResult, profilesResult] = await Promise.allSettled([
-      fetchTemplates(),
-      fetchProfiles(),
-    ]);
-
-    let catalogTemplates: TemplateDefinition[] = [];
-    if (catalogResult.status === "fulfilled") {
-      const catalog = catalogResult.value;
+    try {
+      const catalog = await fetchTemplates();
       setTemplates(catalog.templates);
       setSystemStyle(catalog.systemDefaultStyle);
-      catalogTemplates = catalog.templates;
-    } else {
+      return catalog.templates;
+    } catch {
       setError("Could not load templates. Is the backend running?");
+      return [];
     }
-
-    if (profilesResult.status === "fulfilled") {
-      setProfiles(profilesResult.value);
-      setProfileWarning(null);
-    } else {
-      // Profiles only supply preview data. Keep the editor usable with the
-      // bundled sample when that independent endpoint is temporarily down.
-      setProfiles([]);
-      setProfileWarning("Profiles are unavailable, so the preview is using sample data.");
-    }
-
-    return catalogTemplates;
   }, []);
 
   useEffect(() => {
@@ -167,8 +142,10 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
 
-  const activeProfile = profiles.find((profile) => profile.id === profileId) ?? null;
-  const previewData = activeProfile?.data.profile.fullName ? activeProfile.data : SAMPLE_RESUME;
+  // Always sample data, deliberately -- see the matching note in
+  // TemplatesPage.tsx. A real profile is often sparse and would make a
+  // layout under construction look broken when it isn't.
+  const previewData = SAMPLE_RESUME;
   const effectiveStyle = useMemo<ResumeStyle | null>(() => {
     if (!systemStyle) return null;
     return { ...systemStyle, ...draftStyle } as ResumeStyle;
@@ -339,11 +316,6 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
             <option key={template.id} value={template.id}>{template.name}</option>
           ))}
         </select>
-        {activeProfile && (
-          <span className="templates-active-profile">
-            Previewing <strong>{activeProfile.name}</strong>
-          </span>
-        )}
         <div className="templates-actions">
           {dirty && <span className="unsaved-badge">Unsaved changes</span>}
           <button type="button" onClick={() => open(selected)} disabled={!dirty || busy}>Cancel</button>
@@ -360,7 +332,6 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
       </div>
 
       {error && <p className="error" role="alert">{error}</p>}
-      {profileWarning && <p className="notice" role="status">{profileWarning}</p>}
       {notice && <p className="notice" role="status">{notice}</p>}
 
       {!draft && (
@@ -393,7 +364,7 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
               style={effectiveStyle}
               template={selected}
               layout={draft}
-              isSample={previewData === SAMPLE_RESUME}
+              isSample
             />
           </div>
         </div>
@@ -415,7 +386,7 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
               style={effectiveStyle}
               template={selected}
               layout={v2Draft}
-              isSample={previewData === SAMPLE_RESUME}
+              isSample
             />
           </div>
 
