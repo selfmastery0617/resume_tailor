@@ -293,7 +293,15 @@ def list_jobs() -> list[dict[str, Any]]:
     regardless of what gets edited into a row afterward.
     """
     with get_db() as conn:
-        profile_id = active_profile_id(conn)
+        try:
+            profile_id = active_profile_id(conn)
+        except NoProfile:
+            # A brand-new account has no profile and therefore no jobs -- that's
+            # a valid empty state, not a failure. Every other caller of
+            # active_profile_id() is a write (create/import a job) where there's
+            # no sensible fallback, so NoProfile stays real there; this is the
+            # one read path, and "nothing to show yet" is the correct answer.
+            return []
         rows = conn.execute(
             select(jobs)
             .where(jobs.c.profile_id == profile_id, jobs.c.archived_at.is_(None))
