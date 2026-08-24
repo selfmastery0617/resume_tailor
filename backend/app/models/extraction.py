@@ -48,6 +48,11 @@ extraction_runs = Table(
     # The professional title written for this specific role, after the summary.
     # Named generated_title so it is never confused with the job's own title.
     Column("generated_title", Text, nullable=False, server_default=text("''")),
+    # The resume's skill set, written last in the DeepSeek chat, before
+    # handoff to ChatGPT. Comma-separated, matching how jobs.skills already
+    # stores a skill list elsewhere -- not extraction_skills, which holds
+    # skills parsed out of the job description, a different, earlier thing.
+    Column("skill_set", Text, nullable=False, server_default=text("''")),
     Column("job_mission", Text, nullable=False, server_default=text("''")),
     # 'fallback' means the provider was unavailable and bullets came straight
     # from the corpus — surfaced rather than passed off as generated.

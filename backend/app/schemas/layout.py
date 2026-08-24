@@ -870,11 +870,24 @@ def default_layout() -> TemplateLayoutV2:
                     "summary-content", ["blockTitle", "summaryContent"]
                 ),
             ),
+            # Right after Summary by default -- the tailored skill set
+            # DeepSeek writes (see experience_service._generate_skill_set)
+            # is meant to be seen early, not buried below the full experience
+            # section. A user can still drag it elsewhere per-template.
+            SemanticBlockV2(
+                id="block-skills",
+                type="skills",
+                columnId="page-body-main",
+                order=1,
+                contentFlow=_single_column_flow(
+                    "skills-content", ["blockTitle", "skills"]
+                ),
+            ),
             SemanticBlockV2(
                 id="block-experience",
                 type="experience",
                 columnId="page-body-main",
-                order=1,
+                order=2,
                 contentFlow=_single_column_flow(
                     "experience-content", ["blockTitle", "groups"]
                 ),
@@ -883,15 +896,6 @@ def default_layout() -> TemplateLayoutV2:
                     ["companyName", "roleTitle"],
                     ["period", "location"],
                     ["companySummary", "bullets"],
-                ),
-            ),
-            SemanticBlockV2(
-                id="block-skills",
-                type="skills",
-                columnId="page-body-main",
-                order=2,
-                contentFlow=_single_column_flow(
-                    "skills-content", ["blockTitle", "skills"]
                 ),
             ),
             SemanticBlockV2(
