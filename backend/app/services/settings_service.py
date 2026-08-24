@@ -75,8 +75,13 @@ Target job description:
 Experience just written for this resume ({companies}):
 {bullets}"""
 
-# Runs last, after the summary, in the same chat. The headline on a tailored
-# resume should match the role being applied for rather than stay generic.
+# Runs last of all: ChatGPT's third turn in its revision chat (step 6c in
+# experience_service.py's _revise_with_chatgpt), after the bullets/summary
+# have been revised and keywords marked, so the title reflects the FINAL
+# text rather than a pre-revision draft. Reused as-is for each company's own
+# title too (see _build_title_message), just with that company's bullets
+# substituted for {bullets}. The headline on a tailored resume should match
+# the role being applied for rather than stay generic.
 DEFAULT_TITLE_PROMPT = """Write the professional title for the top of a resume targeting this role.
 
 Rules:
@@ -105,11 +110,11 @@ TITLE_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
-# Runs last in the DeepSeek chat, after the title -- before handoff to
-# ChatGPT for revision (see _revise_with_chatgpt). Where it lands on the
-# rendered resume is up to the template's own "skills" block placement
-# (default_layout() in backend/app/schemas/layout.py puts it right after
-# Summary), not this prompt.
+# Runs last in the DeepSeek chat -- before handoff to ChatGPT for revision
+# (see _revise_with_chatgpt). Where it lands on the rendered resume is up to
+# the template's own "skills" block placement (default_layout() in
+# backend/app/schemas/layout.py puts it right after Summary), not this
+# prompt.
 DEFAULT_SKILL_SET_PROMPT = """Write the skills section for this resume, as a list.
 
 Rules:
@@ -164,7 +169,7 @@ COMPANY_SUMMARY_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
-# Step 7, the pipeline's last step: a fresh ChatGPT chat revises the bullets,
+# Step 6, the pipeline's last step: a fresh ChatGPT chat revises the bullets,
 # summary, and skill set DeepSeek just wrote. No placeholders — the content
 # is handed over separately (see _build_revision_message in
 # experience_service.py, which also appends the fixed, non-editable request
@@ -182,12 +187,13 @@ DEFAULT_REVISION_PROMPT = """Revise this resume.
   Frameworks, Cloud & Infrastructure) rather than one long undifferentiated list.
 - Write in natural, native English."""
 
-# Step 7b: a second message in the SAME ChatGPT chat as the revision above --
+# Step 6b: a second message in the SAME ChatGPT chat as the revision above --
 # not a fresh chat, so it still has the revised text in context (see
 # _build_keyword_message in experience_service.py, which appends the reply
 # format request; this half is pure style instruction). The [bracket] marker
 # is what the PDF renderer looks for to bold a word (RichText/parseBold in
-# frontend/src/resume/format.ts).
+# frontend/src/resume/format.ts). A third message (step 6c) follows this one
+# in the same chat, asking for the titles -- see DEFAULT_TITLE_PROMPT.
 DEFAULT_KEYWORDS_PROMPT = """Now mark the main keywords in the resume you just gave me.
 
 - Wrap each important keyword or phrase in square brackets, like [REST API].

@@ -169,8 +169,12 @@ function createSemanticBlock(
       return {
         ...base,
         contentFlow: flow(row([item("blockTitle", "Experience")]), row([item("groups")])),
+        // roleTitle gets its own row, right below the company/period heading
+        // row, rather than sharing it -- company name on line one, title on
+        // line two. Matches default_layout() in backend/app/schemas/layout.py.
         itemFlow: flow(
-          metadataRow(["companyName", "roleTitle"], ["period", "location"]),
+          metadataRow(["companyName"], ["period", "location"]),
+          row([item("roleTitle")]),
           row([item("companySummary")]),
           row([item("bullets")]),
         ),
