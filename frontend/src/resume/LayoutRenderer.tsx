@@ -40,6 +40,7 @@ import {
   isTemplateLayoutV2,
   type Flow,
   type FlowItem,
+  type FlowRow,
   type LayoutBlock,
   type LayoutDivider,
   type SemanticBlock,
@@ -687,6 +688,36 @@ function resolveSemanticItem(
   }
 }
 
+function flowHasItemRef(flow: Flow, ref: FlowItem["ref"]): boolean {
+  return flow.rows.some((row) =>
+    row.columns.some((column) => column.items.some((flowItem) => flowItem.ref === ref)),
+  );
+}
+
+// Templates saved before per-company titles existed have no "roleTitle" ref
+// anywhere in their itemFlow, so it would otherwise never render there even
+// though every Experience entry now carries one. A template that DOES
+// design for it -- anywhere, not just the default position -- is left
+// untouched; this only fills the gap for templates with no design for it at
+// all, in the same position default_layout() uses on the backend: its own
+// row right after the company/period heading row.
+function withDefaultRoleTitleRow(itemFlow: Flow): Flow {
+  if (flowHasItemRef(itemFlow, "roleTitle")) return itemFlow;
+  const titleRow: FlowRow = {
+    id: "experience-item-roleTitle-row--fallback",
+    columns: [
+      {
+        id: "experience-item-roleTitle-column--fallback",
+        widthPct: 100,
+        items: [{ id: "experience-item-roleTitle--fallback", ref: "roleTitle" }],
+      },
+    ],
+  };
+  const rows = [...itemFlow.rows];
+  rows.splice(1, 0, titleRow);
+  return { rows };
+}
+
 function resolveRepeatedGroups(
   block: SemanticBlock,
   data: ResumeData,
@@ -695,7 +726,8 @@ function resolveRepeatedGroups(
   defaultCharacter: string,
 ): ReactNode | null {
   if (!block.itemFlow) return null;
-  const itemFlow = block.itemFlow;
+  const itemFlow =
+    block.type === "experience" ? withDefaultRoleTitleRow(block.itemFlow) : block.itemFlow;
 
   const entries: Array<{ id: string; context: ItemContext; breakBefore: boolean }> =
     block.type === "experience"

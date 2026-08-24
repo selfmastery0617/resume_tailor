@@ -891,11 +891,18 @@ def default_layout() -> TemplateLayoutV2:
                 contentFlow=_single_column_flow(
                     "experience-content", ["blockTitle", "groups"]
                 ),
+                # roleTitle gets its own row (via trailing_refs, each of
+                # which renders full-width on its own line) rather than
+                # sharing the company/period heading row, so it lands right
+                # below the company name -- e.g. "Senior Data Engineer",
+                # bold (ExperienceRoleTitle already renders it that way; see
+                # _revise_with_chatgpt in experience_service.py for where the
+                # text itself comes from). Product name is left off for now.
                 itemFlow=_entry_flow(
                     "experience-item",
-                    ["companyName", "roleTitle"],
+                    ["companyName"],
                     ["period", "location"],
-                    ["companySummary", "bullets"],
+                    ["roleTitle", "companySummary", "bullets"],
                 ),
             ),
             SemanticBlockV2(

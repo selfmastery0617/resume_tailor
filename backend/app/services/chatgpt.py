@@ -7,11 +7,12 @@ the cookie plus the composer being present rather than from localStorage.
 `ask()` mirrors DeepSeekService.ask()/_ask_sync() (deepseek/service.py): one
 prompt, one fresh chat, one browser launch per call.
 
-`ask_two_turns()` is the one exception: the resume-revision pipeline now
-follows its revision message with a second, in-the-same-chat message asking
-ChatGPT to mark the resume's main keywords — that needs the revised text
-still in context, so it cannot be a second, independent ask() call (which
-would open a brand-new chat with no memory of the first). See
+`ask_chained_turns()` is the one exception: the resume-revision pipeline
+follows its revision message with more, in-the-same-chat messages asking
+ChatGPT to mark the resume's main keywords and then write its title and each
+company's own title — each needs everything said so far still in context, so
+none of them can be a separate, independent ask() call (which would open a
+brand-new chat with no memory of what came before). See
 experience_service._revise_with_chatgpt().
 """
 
@@ -19,7 +20,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from app.services.deepseek.browser import PROFILE_DIR
 
@@ -77,7 +78,7 @@ __all__ = [
     "ASSISTANT_MESSAGE_SELECTOR",
     "is_signed_in",
     "ask",
-    "ask_two_turns",
+    "ask_chained_turns",
     "ChatGPTError",
     "ChatGPTAuthError",
     "ChatGPTResponseError",
@@ -184,7 +185,7 @@ def read_reply(page: Any, after: int = 0) -> str:
 
     `after` is how many assistant bubbles were already on screen before this
     turn's message was sent — 0 for a single-shot chat (every call before
-    ask_two_turns existed), non-zero for a later turn in the same chat. A
+    ask_chained_turns existed), non-zero for a later turn in the same chat. A
     previous turn's bubble is already finished and its text is already
     stable, so without this, step 1 below ("wait for a reply to appear") can
     read that old, unchanged bubble as if it just arrived, and step 2 can
@@ -263,10 +264,10 @@ def _ask_sync(message: str, headless: bool) -> str:
 async def ask(message: str, headless: bool | None = None) -> str:
     """Run one prompt in a fresh ChatGPT chat and return the reply.
 
-    Opens a brand-new chat every call — for a caller that needs a second
-    message to land in the *same* chat as the first, see ask_two_turns()
-    below instead; a second ask() call would start over with no memory of
-    the first.
+    Opens a brand-new chat every call — for a caller that needs more messages
+    to land in the *same* chat as the first, see ask_chained_turns() below
+    instead; a second ask() call would start over with no memory of the
+    first.
     """
     if headless is None:
         headless = _env_flag("CHATGPT_HEADLESS", True)
@@ -277,11 +278,11 @@ async def ask(message: str, headless: bool | None = None) -> str:
         return await asyncio.to_thread(_ask_sync, message, headless)
 
 
-def _ask_two_turns_sync(
+def _ask_chained_turns_sync(
     first_message: str,
-    build_second_message: Callable[[str], "str | None"],
+    build_next_message_fns: Sequence[Callable[[list[str]], "str | None"]],
     headless: bool,
-) -> tuple[str, "str | None"]:
+) -> list[str]:
     from app.services.deepseek import browser as browser_mod
 
     with browser_mod.browser_context(headless=headless) as context:
@@ -291,40 +292,47 @@ def _ask_two_turns_sync(
         )
         assert_logged_in(page)
         send_message(page, first_message)
-        first_reply = read_reply(page)
+        replies = [read_reply(page)]
 
-        # The caller decides, from the first reply's actual content, whether
-        # a follow-up is even worth sending (e.g. no point asking ChatGPT to
-        # mark keywords in a reply that didn't parse into usable bullets in
-        # the first place) -- returning None here skips the second turn.
-        second_message = build_second_message(first_reply)
-        if second_message is None:
-            return first_reply, None
+        for build_next_message in build_next_message_fns:
+            # Each callback decides, from every reply so far, whether its
+            # turn is even worth sending (e.g. no point asking ChatGPT to
+            # mark keywords in a reply that didn't parse into usable bullets
+            # in the first place) -- returning None stops the chain here,
+            # short of however many turns were configured.
+            next_message = build_next_message(replies)
+            if next_message is None:
+                break
+            before = bubble_count(page)
+            send_message(page, next_message)
+            replies.append(read_reply(page, after=before))
 
-        before = bubble_count(page)
-        send_message(page, second_message)
-        second_reply = read_reply(page, after=before)
-        return first_reply, second_reply
+        return replies
 
 
-async def ask_two_turns(
+async def ask_chained_turns(
     first_message: str,
-    build_second_message: Callable[[str], "str | None"],
+    build_next_message_fns: Sequence[Callable[[list[str]], "str | None"]],
     headless: bool | None = None,
-) -> tuple[str, "str | None"]:
-    """Two prompts in the SAME fresh ChatGPT chat, back to back.
+) -> list[str]:
+    """A run of prompts in the SAME fresh ChatGPT chat, each depending on
+    everything said so far.
 
-    Backs the resume pipeline's revision step: the first turn asks ChatGPT to
-    revise the bullets/summaries, and the second -- in the same chat, so it
-    still has that revised text in context rather than needing it pasted
-    again -- asks it to mark the resume's main keywords. `build_second_message`
-    receives the first turn's raw reply and returns the message to send next,
-    or None to skip the second turn entirely.
+    Backs the resume pipeline's revision step: revise the bullets/summaries,
+    then -- in the same chat, so each later turn still has everything said
+    so far in context rather than needing it pasted again -- mark the
+    resume's main keywords, then write the resume's title and each
+    company's own title. Each entry in `build_next_message_fns` receives the
+    list of replies received so far (index 0 is the first turn's reply) and
+    returns the next message to send, or None to stop the chain there.
+    Returns every reply actually received, in order -- always at least one
+    (the first turn's), and short of `len(build_next_message_fns) + 1` if a
+    callback stopped the chain early.
     """
     if headless is None:
         headless = _env_flag("CHATGPT_HEADLESS", True)
 
     async with _get_prompt_lock():
         return await asyncio.to_thread(
-            _ask_two_turns_sync, first_message, build_second_message, headless
+            _ask_chained_turns_sync, first_message, build_next_message_fns, headless
         )

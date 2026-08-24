@@ -159,8 +159,14 @@ class LayoutV2SemanticTests(unittest.TestCase):
 
     def test_entry_metadata_supports_inline_groups_and_four_aligned_cells(self) -> None:
         raw = _v2()
-        experience = _block(raw, "experience")
-        metadata_row = experience["itemFlow"]["rows"][0]
+        # Education, not experience: experience's metadata row is down to 3
+        # items (companyName, period, location) now that roleTitle moved to
+        # its own row below the company name (see default_layout() in
+        # app/schemas/layout.py). Education's is still 2+2, which is what
+        # this test -- a generic "N items split into N aligned cells"
+        # capability check, not something specific to either block -- needs.
+        education = _block(raw, "education")
+        metadata_row = education["itemFlow"]["rows"][0]
         self.assertEqual(
             [column["mode"] for column in metadata_row["columns"]],
             ["inline", "inline"],
@@ -193,7 +199,9 @@ class LayoutV2SemanticTests(unittest.TestCase):
         validate_layout(raw)
 
         raw = _v2()
-        summary_column = _block(raw, "experience")["itemFlow"]["rows"][1]["columns"][0]
+        # rows[1] is roleTitle's own row now (see default_layout()); the
+        # companySummary row this test actually targets moved to rows[2].
+        summary_column = _block(raw, "experience")["itemFlow"]["rows"][2]["columns"][0]
         summary_column["mode"] = "inline"
         with self.assertRaisesRegex(LayoutError, "inline columns"):
             validate_layout(raw)
