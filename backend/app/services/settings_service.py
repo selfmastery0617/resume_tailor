@@ -105,6 +105,37 @@ TITLE_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
+# Runs right after that job's bullets are written, in the same chat, once per
+# role (Job 1, then Job 2) -- so each one describes only that company/product,
+# not the candidate as a whole the way the resume summary does.
+DEFAULT_COMPANY_SUMMARY_PROMPT = """Write a {sentences}-sentence summary introducing this role, for the top of its section on a resume.
+
+Rules:
+- Output only the summary itself — no heading, no label, no bullet points, no quotes.
+- Write in the implied first person: no "I", "my", or the candidate's name.
+- Explain what {product} at {company} does and the scope of the role, so a
+  recruiter understands the context before reading the bullets below it.
+- Use only what the experience below supports. Do not invent employers, titles,
+  metrics, technologies, or years of experience.
+- Tailor the emphasis to the target role.
+
+Target role: {job_title}
+
+Target job description:
+{job_description}
+
+Bullets just written for this role:
+{bullets}"""
+
+COMPANY_SUMMARY_PLACEHOLDERS: tuple[str, ...] = (
+    "sentences",
+    "company",
+    "product",
+    "job_title",
+    "job_description",
+    "bullets",
+)
+
 # Step 6, the pipeline's last step: a fresh ChatGPT chat revises the bullets
 # and summary DeepSeek just wrote. No placeholders — the content is handed
 # over separately (see _build_revision_message in experience_service.py), so
@@ -188,6 +219,9 @@ DEFAULTS: dict[str, Any] = {
     "summaryPrompt": DEFAULT_SUMMARY_PROMPT,
     # Step 5: the headline title, written once the summary exists.
     "titlePrompt": DEFAULT_TITLE_PROMPT,
+    # Steps 4a/4b: one summary per role (Job 1, Job 2), introducing that
+    # company/product above its bullets.
+    "companySummaryPrompt": DEFAULT_COMPANY_SUMMARY_PROMPT,
     # Step 6: a fresh ChatGPT chat revises the bullets and summary.
     "revisionPrompt": DEFAULT_REVISION_PROMPT,
     # Not part of extraction: builds a profile's database.json on demand.
@@ -244,6 +278,7 @@ PROMPT_KEYS: dict[str, str] = {
     "tailoringPrompt": "tailoring",
     "summaryPrompt": "summary",
     "titlePrompt": "title",
+    "companySummaryPrompt": "companysummary",
     "revisionPrompt": "revision",
     "corpusPrompt": "corpus",
 }
@@ -293,6 +328,19 @@ def get_settings() -> dict[str, Any]:
         ):
             if row.kind in by_kind:
                 stored[by_kind[row.kind]] = row.body
+
+        # Profile-scoped prompts win over the account-wide ones just loaded,
+        # same "overwrite what's already there" pattern as the settings block
+        # above -- each profile gets its own prompts, falling back to
+        # whatever was customized account-wide, then to DEFAULTS.
+        if profile_id is not None:
+            for row in conn.execute(
+                select(prompts.c.kind, prompts.c.body).where(
+                    prompts.c.scope == "profile", prompts.c.profile_id == profile_id
+                )
+            ):
+                if row.kind in by_kind:
+                    stored[by_kind[row.kind]] = row.body
 
     return {**DEFAULTS, **{k: v for k, v in stored.items() if k in DEFAULTS}}
 
@@ -378,23 +426,49 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
     with get_db() as conn:
         for key, value in cleaned.items():
             if kind := PROMPT_KEYS.get(key):
-                # The partial unique index covers (user_id, kind) where the
-                # scope is 'user', which is what makes this upsert land on one
-                # row instead of accumulating revisions.
-                statement = pg_insert(prompts).values(
-                    id=uuid7(),
-                    scope="user",
-                    user_id=user_id,
-                    kind=kind,
-                    body=str(value),
-                )
-                conn.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=[prompts.c.user_id, prompts.c.kind],
-                        index_where=prompts.c.scope == "user",
-                        set_={"body": statement.excluded.body, "updated_at": func.now()},
+                # Each profile gets its own prompts once one exists -- the
+                # partial unique index covers (profile_id, kind) where the
+                # scope is 'profile'. Unlike PROFILE_SCOPED settings below,
+                # this does not raise when there's no active profile yet: a
+                # prompt still has a meaningful account-wide fallback value
+                # (get_settings() reads it back via the scope='user' tier),
+                # so degrading to that instead of a hard failure is correct
+                # here -- in practice this branch is barely reachable anyway,
+                # since the only prompt-editing UI only renders once a
+                # profile is selected.
+                if profile_id is not None:
+                    statement = pg_insert(prompts).values(
+                        id=uuid7(),
+                        scope="profile",
+                        profile_id=profile_id,
+                        kind=kind,
+                        body=str(value),
                     )
-                )
+                    conn.execute(
+                        statement.on_conflict_do_update(
+                            index_elements=[prompts.c.profile_id, prompts.c.kind],
+                            index_where=prompts.c.scope == "profile",
+                            set_={"body": statement.excluded.body, "updated_at": func.now()},
+                        )
+                    )
+                else:
+                    # The partial unique index covers (user_id, kind) where
+                    # the scope is 'user', which is what makes this upsert
+                    # land on one row instead of accumulating revisions.
+                    statement = pg_insert(prompts).values(
+                        id=uuid7(),
+                        scope="user",
+                        user_id=user_id,
+                        kind=kind,
+                        body=str(value),
+                    )
+                    conn.execute(
+                        statement.on_conflict_do_update(
+                            index_elements=[prompts.c.user_id, prompts.c.kind],
+                            index_where=prompts.c.scope == "user",
+                            set_={"body": statement.excluded.body, "updated_at": func.now()},
+                        )
+                    )
             elif key in PROFILE_SCOPED:
                 if profile_id is None:
                     raise ValueError(

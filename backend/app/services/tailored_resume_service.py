@@ -3,7 +3,7 @@
 Turns a stored experience extraction into a resume PDF and writes it to the
 output folder configured in Settings:
 
-    <outputFolder>/<mm-dd-yy>_<Company>_<Job Title>/<Profile Name>_resume.pdf
+    <outputFolder>/<Profile Name>/<mm-dd-yy>_<Company>_<Job Title>/<Profile Name>_resume.pdf
 
 The extraction's two roles *replace* the profile's experience section — that is
 the point of the feature, and the counts (6 and 8 bullets, two projects) are
@@ -13,6 +13,7 @@ tailored PDF is the user's own resume with a job-specific experience section.
 """
 
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,11 @@ from app.db import get_db
 from app.models import generated_documents, profiles, templates
 from app.schemas.resume import Experience, Profile, ResumeData
 from app.services import experience_service, profile_service, resume_service, settings_service
-from app.services.pdf.filename import build_job_folder_name, build_tailored_pdf_filename
+from app.services.pdf.filename import (
+    build_job_folder_name,
+    build_profile_folder_name,
+    build_tailored_pdf_filename,
+)
 from app.services.progress import progress
 
 
@@ -233,7 +238,7 @@ async def generate_for_job(
     root = _output_root()
     profile = resolve_profile(profile_id)
 
-    folder = root / build_job_folder_name(company, job_title)
+    folder = root / build_profile_folder_name(profile.name) / build_job_folder_name(company, job_title)
     file_name = build_tailored_pdf_filename(profile.name)
     destination = folder / file_name
 
@@ -417,12 +422,41 @@ def read_pdf(job_id: str) -> tuple[bytes, str]:
     return path.read_bytes(), record["fileName"]
 
 
+def open_folder(job_id: str) -> None:
+    """Open the saved PDF's folder in Explorer, with the file itself selected.
+
+    Backend and browser run on the same machine here (a local desktop app,
+    not a hosted multi-user one) -- see shared_browser.py's shared sign-in
+    window for the same assumption elsewhere in this app -- so it's safe for
+    the backend to launch a native Explorer window directly.
+    """
+    record = get_record(job_id)
+    if record is None:
+        raise TailoredResumeError("No resume has been generated for this job.")
+
+    path = Path(record["filePath"])
+    if path.is_file():
+        # Explorer's own exit code is unreliable (often non-zero even when it
+        # opens fine), so this doesn't check returncode -- only that the
+        # process could be launched at all.
+        subprocess.Popen(["explorer", "/select,", str(path)])
+        return
+
+    folder = Path(record["folder"])
+    if folder.is_dir():
+        subprocess.Popen(["explorer", str(folder)])
+        return
+
+    raise TailoredResumeError(f"The saved file and its folder are both missing: {path}")
+
+
 __all__ = [
     "TailoredResumeError",
     "all_records",
     "build_tailored_data",
     "generate_for_job",
     "get_record",
+    "open_folder",
     "read_pdf",
     "resolve_profile",
 ]
