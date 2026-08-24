@@ -29,6 +29,42 @@
   letter-spacing: -0.01em;
 }
 
+.sidebar-active-profile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 0.5rem 0.5rem 0.65rem;
+  margin-bottom: 0.35rem;
+  cursor: pointer;
+}
+
+.sidebar-active-profile:hover .sidebar-active-profile-name {
+  text-decoration: underline;
+}
+
+.sidebar-active-profile-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.sidebar-active-profile-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-h);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 .sidebar-nav {
   display: flex;
   flex-direction: column;
@@ -510,6 +546,19 @@
   border: 1px solid var(--border, #e5e4e7);
   border-radius: 6px;
   resize: vertical;
+}
+
+.prompt-select {
+  width: 100%;
+  max-width: 420px;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border, #e5e4e7);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: inherit;
 }
 
 .skills-extract-button {
@@ -1573,6 +1622,17 @@ a.experience-badge:hover { text-decoration: underline; }
 
 .resume-regenerate:hover { color: var(--text-h); }
 
+.resume-open-folder {
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.resume-open-folder:hover { color: var(--text-h); }
+
 /* ---- jobs table ---- */
 .jobs-page {
   display: flex;
@@ -1595,6 +1655,15 @@ a.experience-badge:hover { text-decoration: underline; }
   font-size: 0.74rem;
   color: var(--text-dim);
   margin-right: auto;
+}
+
+.templates-active-profile {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.templates-active-profile strong {
+  color: var(--text-h);
 }
 
 .page-size {

@@ -7,7 +7,7 @@ export interface TailoredResume {
   profileId: string | null;
   profileName: string;
   templateId: string;
-  /** Absolute path of the `[mm-dd-yy]_[Company]_[Job Title]` folder. */
+  /** Absolute path of the `[Profile Name]/[mm-dd-yy]_[Company]_[Job Title]` folder. */
   folder: string;
   fileName: string;
   filePath: string;
@@ -42,4 +42,11 @@ export async function fetchAllTailoredResumes(): Promise<Record<string, Tailored
 /** Served from disk, so this opens the same bytes that were saved. */
 export function tailoredResumeUrl(jobId: string): string {
   return `${BACKEND_URL}/api/resumes/tailored/${encodeURIComponent(jobId)}/file`;
+}
+
+/** Opens the saved PDF's folder in Explorer on the machine running the backend. */
+export async function openTailoredResumeFolder(jobId: string): Promise<void> {
+  await axios.post(
+    `${BACKEND_URL}/api/resumes/tailored/${encodeURIComponent(jobId)}/open-folder`,
+  );
 }

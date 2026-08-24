@@ -13,16 +13,20 @@ import {
   updateProfile,
   type ProfileDeletionImpact,
 } from "../api/templates";
+import { fetchSettings, type AppSettings } from "../api/settings";
+import { useActiveProfileSettings } from "../hooks/useActiveProfileSettings";
 import { DeleteProfileDialog } from "../components/DeleteProfileDialog";
 import { ProfileCorpusEditor } from "../components/ProfileCorpusEditor";
+import { PROMPT_DEFS, type PromptKey } from "../resume/promptDefs";
 import type {
   Education,
-  Experience,
   Profile,
   ProfileInfo,
   ResumeData,
   Skill,
 } from "../resume/types";
+
+const PROMPT_KEYS_LIST: PromptKey[] = PROMPT_DEFS.map((def) => def.key);
 
 const EMPTY_DATA: ResumeData = {
   profile: {
@@ -37,18 +41,6 @@ const EMPTY_DATA: ResumeData = {
 
 const newId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
-
-/** True once there's enough content for a resume to be worth rendering. */
-export function profileHasContent(data: ResumeData | undefined): boolean {
-  if (!data) return false;
-  return Boolean(
-    data.profile.fullName.trim() ||
-      data.profile.summary.trim() ||
-      data.experience.length ||
-      data.education.length ||
-      data.skills.length,
-  );
-}
 
 const PERSONAL_FIELDS: { key: keyof ProfileInfo; label: string; placeholder?: string }[] = [
   { key: "fullName", label: "Full name", placeholder: "Alex Chen" },
@@ -67,9 +59,14 @@ const PERSONAL_FIELDS: { key: keyof ProfileInfo; label: string; placeholder?: st
 interface ProfilePageProps {
   /** True while this tab is visible; see the note in TemplatesPage. */
   active?: boolean;
+  /** Told after the shared active profile changes here (switched, created,
+   *  or promoted after a delete), so the always-visible sidebar can update
+   *  too -- it can't rely on "refetch when this tab becomes active" the way
+   *  every other page does, since it's never inactive. */
+  onProfileChanged?: () => void;
 }
 
-export function ProfilePage({ active = true }: ProfilePageProps) {
+export function ProfilePage({ active = true, onProfileChanged }: ProfilePageProps) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ResumeData>(EMPTY_DATA);
@@ -81,20 +78,50 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // This profile's own prompts -- one shared active-profile switch across
+  // the whole app, driven by the `resumeProfile` setting Jobs/the tailoring
+  // pipeline already read (see useActiveProfileSettings).
+  const { switchProfile, patchSettings } = useActiveProfileSettings(active);
+  const [promptDraft, setPromptDraft] = useState<AppSettings | null>(null);
+  const [promptSaved, setPromptSaved] = useState<AppSettings | null>(null);
+  const [selectedPromptKey, setSelectedPromptKey] = useState<PromptKey>("skillsPrompt");
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
+  const [promptNotice, setPromptNotice] = useState<string | null>(null);
+
   useEffect(() => {
     if (!active) return;
     (async () => {
       try {
-        const list = await fetchProfiles();
+        // Fetched together, and settings read directly here rather than via
+        // the hook's own (separately-timed) state: the two requests resolve
+        // independently, and seeding activeId from whichever one happened to
+        // land first would risk picking the wrong initial profile, with
+        // nothing to correct it afterward (activeId is only ever seeded once
+        // — see the guard below).
+        const [list, initialSettings] = await Promise.all([
+          fetchProfiles(),
+          fetchSettings().catch(() => null),
+        ]);
         setProfiles(list);
+        if (initialSettings) {
+          setPromptDraft(initialSettings);
+          setPromptSaved(initialSettings);
+        }
         // Only seed the editor when nothing is open yet — refreshing must never
-        // clobber edits in progress.
+        // clobber edits in progress. Prefer the shared active profile
+        // (resumeProfile) if it still resolves to a real profile, else fall
+        // back to the first one — the same fallback the backend itself uses.
         setActiveId((current) => {
           if (current) return current;
-          if (list.length) {
-            setDraft(list[0].data);
-            setSaved(list[0].data);
-            return list[0].id;
+          const preferred = initialSettings?.resumeProfile
+            ? list.find((p) => p.id === initialSettings.resumeProfile)
+            : undefined;
+          const initial = preferred ?? list[0];
+          if (initial) {
+            setDraft(initial.data);
+            setSaved(initial.data);
+            return initial.id;
           }
           return null;
         });
@@ -104,13 +131,23 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
     })();
   }, [active]);
 
-  const selectProfile = (id: string) => {
+  const selectProfile = async (id: string) => {
     const found = profiles.find((p) => p.id === id);
     if (!found) return;
     setActiveId(id);
     setDraft(found.data);
     setSaved(found.data);
     setNotice(null);
+    setPromptError(null);
+    setPromptNotice(null);
+    try {
+      const updated = await switchProfile(id);
+      setPromptDraft(updated);
+      setPromptSaved(updated);
+      onProfileChanged?.();
+    } catch {
+      setError("Could not switch the active profile.");
+    }
   };
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
@@ -151,33 +188,68 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
       setActiveId(created.id);
       setDraft(created.data);
       setSaved(created.data);
+      // A newly created profile becomes the shared active one too, so Jobs
+      // and Templates immediately follow it rather than still pointing at
+      // whatever was active before.
+      const updated = await switchProfile(created.id);
+      setPromptDraft(updated);
+      setPromptSaved(updated);
+      onProfileChanged?.();
     } catch {
       setError("Could not create the profile.");
     }
   };
 
+  // -- this profile's prompts ----------------------------------------------
+  // A separate save flow from "Save profile" above: that one saves resume
+  // content (ResumeData) via updateProfile(); this one saves prompt settings
+  // (AppSettings) via patchSettings() -- different backend resources,
+  // deliberately not conflated into one button/dirty-check.
+
+  const promptDirty =
+    promptDraft !== null &&
+    promptSaved !== null &&
+    JSON.stringify(promptDraft) !== JSON.stringify(promptSaved);
+
+  const selectedPromptDef =
+    PROMPT_DEFS.find((def) => def.key === selectedPromptKey) ?? PROMPT_DEFS[0];
+  const missingSelectedPlaceholders = (selectedPromptDef.placeholders ?? []).filter(
+    (token) => !(promptDraft?.[selectedPromptDef.key] ?? "").includes(`{${token}}`),
+  );
+
+  const updatePrompt = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
+    setPromptDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
+    setPromptNotice(null);
+  };
+
+  const handleSavePrompts = async () => {
+    if (!promptDraft) return;
+    setPromptSaving(true);
+    setPromptError(null);
+    try {
+      const patch = Object.fromEntries(
+        PROMPT_KEYS_LIST.map((key) => [key, promptDraft[key]]),
+      ) as Partial<AppSettings>;
+      const updated = await patchSettings(patch);
+      setPromptDraft(updated);
+      setPromptSaved(updated);
+      setPromptNotice("Prompts saved.");
+    } catch {
+      setPromptError("Could not save prompts.");
+    } finally {
+      setPromptSaving(false);
+    }
+  };
+
+  const handleCancelPrompts = () => {
+    setPromptDraft(promptSaved);
+    setPromptNotice(null);
+  };
+
   // -- repeatable sections ------------------------------------------------
-
-  const addExperience = () =>
-    setDraft((prev) => ({
-      ...prev,
-      experience: [
-        ...prev.experience,
-        {
-          id: newId("exp"), company: "", title: "", location: "",
-          startDate: "", endDate: "", current: false, companySummary: "", description: "",
-        },
-      ],
-    }));
-
-  const updateExperience = (id: string, patch: Partial<Experience>) =>
-    setDraft((prev) => ({
-      ...prev,
-      experience: prev.experience.map((e) => (e.id === id ? { ...e, ...patch } : e)),
-    }));
-
-  const removeExperience = (id: string) =>
-    setDraft((prev) => ({ ...prev, experience: prev.experience.filter((e) => e.id !== id) }));
+  // Experience is no longer hand-entered here: extraction (DeepSeek) writes
+  // it per job, replacing whatever's here at PDF-generation time -- see
+  // build_tailored_data() in tailored_resume_service.py.
 
   const addEducation = () =>
     setDraft((prev) => ({
@@ -241,7 +313,7 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
       // Move to whichever profile the backend promoted, else the first left.
       const next = remaining.find((p) => p.id === result.promoted) ?? remaining[0] ?? null;
       if (next) {
-        selectProfile(next.id);
+        void selectProfile(next.id);
       } else {
         setActiveId(null);
         setDraft(EMPTY_DATA);
@@ -271,7 +343,7 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
         <select
           id="profile-editor-select"
           value={activeId ?? ""}
-          onChange={(event) => selectProfile(event.target.value)}
+          onChange={(event) => void selectProfile(event.target.value)}
           disabled={profiles.length === 0}
         >
           {profiles.length === 0 && <option value="">No profiles yet</option>}
@@ -337,123 +409,6 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
                 </div>
               ))}
             </div>
-            <div className="prompt-section">
-              <label htmlFor="pi-summary">Summary</label>
-              <textarea
-                id="pi-summary"
-                className="prompt-textarea"
-                rows={4}
-                placeholder="Backend engineer with 8 years building distributed services…"
-                value={draft.profile.summary}
-                onChange={(event) => setPersonal("summary", event.target.value)}
-              />
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <h2>
-              Experience <button type="button" onClick={addExperience}>+ Add</button>
-            </h2>
-            {draft.experience.length === 0 && <p className="notice">No experience entries yet.</p>}
-            {draft.experience.map((entry) => (
-              <div key={entry.id} className="entry-card">
-                <div className="field-grid">
-                  <div className="field">
-                    <label htmlFor={`exp-title-${entry.id}`}>Job title</label>
-                    <input
-                      id={`exp-title-${entry.id}`}
-                      value={entry.title}
-                      onChange={(e) => updateExperience(entry.id, { title: e.target.value })}
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor={`exp-company-${entry.id}`}>Company</label>
-                    <input
-                      id={`exp-company-${entry.id}`}
-                      value={entry.company}
-                      onChange={(e) => updateExperience(entry.id, { company: e.target.value })}
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor={`exp-loc-${entry.id}`}>Location</label>
-                    <input
-                      id={`exp-loc-${entry.id}`}
-                      value={entry.location}
-                      onChange={(e) => updateExperience(entry.id, { location: e.target.value })}
-                    />
-                  </div>
-                  {/* Years, not months: that is what tailored resumes render,
-                      so accepting "Mar 2021" here would only promise a
-                      precision the output does not keep. */}
-                  <div className="field">
-                    <label htmlFor={`exp-start-${entry.id}`}>Start year</label>
-                    <input
-                      id={`exp-start-${entry.id}`}
-                      inputMode="numeric"
-                      placeholder="2021"
-                      value={entry.startDate}
-                      onChange={(e) =>
-                        updateExperience(entry.id, {
-                          startDate: e.target.value.replace(/\D/g, "").slice(0, 4),
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor={`exp-end-${entry.id}`}>End year</label>
-                    <input
-                      id={`exp-end-${entry.id}`}
-                      inputMode="numeric"
-                      placeholder="2024"
-                      disabled={entry.current}
-                      value={entry.endDate}
-                      onChange={(e) =>
-                        updateExperience(entry.id, {
-                          endDate: e.target.value.replace(/\D/g, "").slice(0, 4),
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="field field--inline">
-                    <label htmlFor={`exp-current-${entry.id}`}>Current role</label>
-                    <input
-                      id={`exp-current-${entry.id}`}
-                      type="checkbox"
-                      checked={entry.current}
-                      onChange={(e) => updateExperience(entry.id, { current: e.target.checked })}
-                    />
-                  </div>
-                </div>
-                <div className="prompt-section">
-                  <label htmlFor={`exp-company-summary-${entry.id}`}>Company summary</label>
-                  <textarea
-                    id={`exp-company-summary-${entry.id}`}
-                    className="prompt-textarea"
-                    rows={3}
-                    placeholder="Briefly describe the company, product, or organization."
-                    value={entry.companySummary}
-                    onChange={(e) =>
-                      updateExperience(entry.id, { companySummary: e.target.value })
-                    }
-                  />
-                </div>
-                <div className="prompt-section">
-                  <label htmlFor={`exp-desc-${entry.id}`}>
-                    Description — one bullet per line
-                  </label>
-                  <textarea
-                    id={`exp-desc-${entry.id}`}
-                    className="prompt-textarea"
-                    rows={4}
-                    value={entry.description}
-                    onChange={(e) => updateExperience(entry.id, { description: e.target.value })}
-                  />
-                </div>
-                <button type="button" className="remove-button" onClick={() => removeExperience(entry.id)}>
-                  Remove
-                </button>
-              </div>
-            ))}
           </section>
 
           <section className="settings-section">
@@ -539,6 +494,76 @@ export function ProfilePage({ active = true }: ProfilePageProps) {
               </div>
             ))}
           </section>
+
+          <section className="settings-section">
+            <h2>Prompts</h2>
+            <p className="notice">
+              This profile's own prompts — customizing one here only affects
+              resumes tailored under <strong>{profiles.find((p) => p.id === activeId)?.name}</strong>,
+              not your other profiles. The first five run as turns in a{" "}
+              <strong>single DeepSeek chat</strong> for one job. The sixth
+              runs once more, in a fresh <strong>ChatGPT chat</strong>, to
+              revise the bullets, company summaries, and overall summary
+              DeepSeek just wrote. The last is separate — it builds this
+              profile's career database rather than tailoring a resume.
+            </p>
+
+            {promptError && <p className="error">{promptError}</p>}
+            {promptNotice && <p className="notice">{promptNotice}</p>}
+
+            {promptDraft && (
+              <div className="prompt-section">
+                <label htmlFor="profile-prompt-select">Prompt to edit</label>
+                <select
+                  id="profile-prompt-select"
+                  className="prompt-select"
+                  value={selectedPromptDef.key}
+                  onChange={(event) => setSelectedPromptKey(event.target.value as PromptKey)}
+                >
+                  {PROMPT_DEFS.map((def) => (
+                    <option key={def.key} value={def.key}>
+                      {def.label}
+                    </option>
+                  ))}
+                </select>
+
+                <p className="notice">{selectedPromptDef.description}</p>
+
+                <textarea
+                  id="profile-prompt-textarea"
+                  className="prompt-textarea"
+                  rows={selectedPromptDef.rows}
+                  value={promptDraft[selectedPromptDef.key]}
+                  onChange={(event) => updatePrompt(selectedPromptDef.key, event.target.value)}
+                />
+                {missingSelectedPlaceholders.length > 0 && (
+                  <p className="notice exp-warn">
+                    Missing {missingSelectedPlaceholders.map((t) => `{${t}}`).join(", ")}{" "}
+                    — the model won't receive that context.
+                  </p>
+                )}
+
+                <div className="settings-actions">
+                  {promptDirty && <span className="unsaved-badge">Unsaved changes</span>}
+                  <button
+                    type="button"
+                    onClick={handleCancelPrompts}
+                    disabled={!promptDirty || promptSaving}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSavePrompts()}
+                    disabled={!promptDirty || promptSaving}
+                  >
+                    {promptSaving ? "Saving…" : "Save prompts"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+
           <ProfileCorpusEditor
             profileId={activeId}
             profileName={profiles.find((p) => p.id === activeId)?.name ?? ""}

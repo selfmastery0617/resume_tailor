@@ -152,3 +152,15 @@ def download_tailored_resume(job_id: str):
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
+
+
+@router.post("/api/resumes/tailored/{job_id}/open-folder")
+def open_tailored_resume_folder(job_id: str):
+    """Open the saved PDF's folder in Explorer, on the machine running the backend."""
+    try:
+        tailored_resume_service.open_folder(job_id)
+    except TailoredResumeError as exc:
+        raise HTTPException(
+            status_code=404, detail={"code": "RESUME_NOT_FOUND", "message": str(exc)}
+        ) from exc
+    return {"ok": True}

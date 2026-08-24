@@ -33,6 +33,7 @@ import {
 import {
   fetchAllTailoredResumes,
   generateTailoredResume,
+  openTailoredResumeFolder,
   type TailoredResume,
 } from "../api/resumes";
 import { extractExperience, fetchAllExperience, type ExperienceResult } from "../api/experience";
@@ -115,9 +116,14 @@ interface JobsPageProps {
   /** Changes when the DeepSeek session may have, so the banner re-checks
    *  instead of standing on the answer it got when the tab first mounted. */
   sessionVersion: number;
+  /** True while this tab is visible. Pages stay mounted to preserve unsaved
+   *  edits, so they must refresh on activation or they show stale data --
+   *  e.g. the jobs list after switching the active profile on the Profile
+   *  tab (jobs are scoped to whichever profile is active). */
+  active?: boolean;
 }
 
-export function JobsPage({ sessionVersion }: JobsPageProps) {
+export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [experienceResults, setExperienceResults] = useState<Record<string, ExperienceResult>>({});
   const [resumeResults, setResumeResults] = useState<Record<string, TailoredResume>>({});
@@ -163,7 +169,12 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
     }
   }, []);
 
+  // Re-runs whenever this tab (re)activates, not just on mount: jobs are
+  // scoped to the active profile, and switching that on the Profile tab
+  // while Jobs stays mounted-but-hidden would otherwise leave this page
+  // showing the previous profile's stale list.
   useEffect(() => {
+    if (!active) return;
     void reload();
     void (async () => {
       try {
@@ -185,7 +196,7 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
         /* the toolbar just shows "Import Jobs" */
       }
     })();
-  }, [reload]);
+  }, [active, reload]);
 
   // Separate from the mount effect so signing in from the dock clears the
   // banner without refetching every job and badge as well.
@@ -516,6 +527,15 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
     [experienceResults, reload],
   );
 
+  const handleOpenFolder = useCallback(async (job: Job) => {
+    setError(null);
+    try {
+      await openTailoredResumeFolder(job.id);
+    } catch (err) {
+      setError(describeError(err, "Could not open the folder."));
+    }
+  }, []);
+
   const [bulkGenerating, setBulkGenerating] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -781,6 +801,7 @@ export function JobsPage({ sessionVersion }: JobsPageProps) {
     resumeResults,
     bulkRunning: bulkGenerating,
     onGenerateResume: handleGenerateResume,
+    onOpenFolder: handleOpenFolder,
     onOpenDescription: setDescriptionModalJob,
     deletingRows,
     onDeleteRow: deleteRow,

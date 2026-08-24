@@ -14,6 +14,7 @@ import {
   updateTemplate,
 } from "../api/builder";
 import { fetchProfiles, fetchTemplates } from "../api/templates";
+import { useActiveProfileSettings } from "../hooks/useActiveProfileSettings";
 import { ResumePreview } from "../components/ResumePreview";
 import { APPROVED_FONTS } from "../resume/fonts";
 import type {
@@ -81,7 +82,11 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
   const [templates, setTemplates] = useState<TemplateDefinition[]>([]);
   const [systemStyle, setSystemStyle] = useState<ResumeStyle | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [profileId, setProfileId] = useState<string | null>(null);
+  // The shared active profile (see useActiveProfileSettings) -- this page has
+  // no profile picker of its own, it previews with whatever's active on the
+  // Profile tab, same as Templates page.
+  const { settings: appSettings } = useActiveProfileSettings(active);
+  const profileId = appSettings?.resumeProfile || profiles[0]?.id || null;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<TemplateLayout | null>(null);
   const [saved, setSaved] = useState<TemplateLayout | null>(null);
@@ -121,19 +126,12 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
     }
 
     if (profilesResult.status === "fulfilled") {
-      const profileList = profilesResult.value;
-      setProfiles(profileList);
-      setProfileId((current) =>
-        current && profileList.some((profile) => profile.id === current)
-          ? current
-          : profileList[0]?.id ?? null,
-      );
+      setProfiles(profilesResult.value);
       setProfileWarning(null);
     } else {
       // Profiles only supply preview data. Keep the editor usable with the
       // bundled sample when that independent endpoint is temporarily down.
       setProfiles([]);
-      setProfileId(null);
       setProfileWarning("Profiles are unavailable, so the preview is using sample data.");
     }
 
@@ -341,17 +339,11 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
             <option key={template.id} value={template.id}>{template.name}</option>
           ))}
         </select>
-        <label htmlFor="builder-profile">Preview with</label>
-        <select
-          id="builder-profile"
-          value={profileId ?? ""}
-          onChange={(event) => setProfileId(event.target.value || null)}
-        >
-          {profiles.length === 0 && <option value="">Sample data</option>}
-          {profiles.map((profile) => (
-            <option key={profile.id} value={profile.id}>{profile.name}</option>
-          ))}
-        </select>
+        {activeProfile && (
+          <span className="templates-active-profile">
+            Previewing <strong>{activeProfile.name}</strong>
+          </span>
+        )}
         <div className="templates-actions">
           {dirty && <span className="unsaved-badge">Unsaved changes</span>}
           <button type="button" onClick={() => open(selected)} disabled={!dirty || busy}>Cancel</button>

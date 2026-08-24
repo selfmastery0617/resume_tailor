@@ -3,7 +3,7 @@
 Two shapes, deliberately different:
 
 * Download name:  <profile-name>-<template-id>-resume.pdf   (slug, ASCII-only)
-* Saved on disk:  <output>/<mm-dd-yy>_<Company>_<Job Title>/<Profile>_resume.pdf
+* Saved on disk:  <output>/<Profile Name>/<mm-dd-yy>_<Company>_<Job Title>/<Profile>_resume.pdf
 
 The on-disk shape is specified by the user and keeps spaces and capitals, so it
 gets its own sanitiser: strict enough to be traversal-proof and legal on
@@ -78,3 +78,9 @@ def build_job_folder_name(company: str, job_title: str, when: date | None = None
 def build_tailored_pdf_filename(profile_name: str) -> str:
     """`<Profile Name>_resume.pdf`, as specified for the saved file."""
     return f"{sanitize_component(profile_name, 'profile')}_resume.pdf"
+
+
+def build_profile_folder_name(profile_name: str) -> str:
+    """`<Profile Name>`, the top-level folder under the output root -- each
+    profile's applications live in their own sibling folder there."""
+    return sanitize_component(profile_name, "Profile")
