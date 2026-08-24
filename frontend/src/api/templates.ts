@@ -25,6 +25,28 @@ export async function fetchProfiles(): Promise<Profile[]> {
   return response.data;
 }
 
+/** The resume shown in Templates/Builder pages' preview -- always this, never
+ *  a real profile's (see the note on previewData in TemplatesPage.tsx). */
+export async function fetchSampleResume(): Promise<ResumeData> {
+  const response = await axios.get<ResumeData>(`${BACKEND_URL}/api/templates/sample-resume`);
+  return response.data;
+}
+
+export async function saveSampleResume(data: ResumeData): Promise<ResumeData> {
+  const response = await axios.put<ResumeData>(
+    `${BACKEND_URL}/api/templates/sample-resume`,
+    data,
+  );
+  return response.data;
+}
+
+export async function resetSampleResume(): Promise<ResumeData> {
+  const response = await axios.post<ResumeData>(
+    `${BACKEND_URL}/api/templates/sample-resume/reset`,
+  );
+  return response.data;
+}
+
 export async function createProfile(name: string): Promise<Profile> {
   const response = await axios.post<Profile>(`${BACKEND_URL}/api/profiles`, { name });
   return response.data;
