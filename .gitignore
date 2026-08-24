@@ -80,3 +80,10 @@ blob-report/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local application database
+data/
+*.sqlite3
+
+# Local migration backups can contain resume data and database credentials.
+backups/

@@ -4,3 +4,13 @@ pydantic
 httpx
 python-dotenv
 playwright
+pypdf
+
+# Postgres schema and migrations. SQLAlchemy Core (not the ORM) — the services
+# are written as queries, and Core keeps them that way while giving Alembic
+# something to autogenerate against.
+sqlalchemy>=2.0
+alembic>=1.13
+psycopg[binary]>=3.1
+# Supplies the vector column type and the HNSW operator classes.
+pgvector>=0.2.5

@@ -1,111 +1,271 @@
+/* Design tokens.
+ *
+ * Dark-grey is the primary identity: neutral layered greys carry the UI, and
+ * the accent appears only on interactive/active elements so it stays a signal
+ * rather than decoration.
+ *
+ * Three theme states, in precedence order:
+ *   1. :root                       -> light
+ *   2. prefers-color-scheme: dark  -> dark, unless the user forced light
+ *   3. [data-theme="dark"|"light"] -> explicit choice always wins
+ *
+ * Every colour is defined on bare :root first, so nothing depends on a media
+ * query having matched.
+ */
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  /* Surfaces, lightest to most recessed */
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f1f3f5;
+  --surface-3: #e9ecef;
+
+  --border: #dfe3e8;
+  --border-strong: #c8cfd6;
+
+  --text-h: #16191d;
+  --text: #4a5259;
+  --text-dim: #79838d;
+
+  --accent: #3b7ddd;
+  --accent-hover: #2f6bc4;
+  --accent-fg: #ffffff;
+  --accent-bg: rgba(59, 125, 221, 0.1);
+  --accent-border: rgba(59, 125, 221, 0.45);
+
+  --success: #16a36a;
+  --success-bg: rgba(22, 163, 106, 0.1);
+  --warning: #b57d0a;
+  --warning-bg: rgba(214, 158, 46, 0.13);
+  --danger: #d0453b;
+
+  --radius: 8px;
+  --radius-sm: 6px;
+  --shadow: 0 1px 2px rgba(16, 19, 22, 0.06), 0 4px 12px rgba(16, 19, 22, 0.05);
+  --shadow-lg: 0 10px 30px -8px rgba(16, 19, 22, 0.25);
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
+  font: 14.5px/1.5 var(--sans);
   color: var(--text);
   background: var(--bg);
+  color-scheme: light;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
 }
 
+/* Dark-grey palette. Neutral greys with a hint of blue so they read as
+   deliberate rather than washed out. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
+  :root:not([data-theme='light']) {
+    --bg: #17191c;
+    --surface: #1e2125;
+    --surface-2: #1a1d20;
+    --surface-3: #272b30;
 
-  #social .button-icon {
-    filter: invert(1) brightness(2);
+    --border: #2f343a;
+    --border-strong: #3d444c;
+
+    --text-h: #e8ebee;
+    --text: #a2abb4;
+    --text-dim: #78828c;
+
+    --accent: #5b93f0;
+    --accent-hover: #6fa2f5;
+    --accent-fg: #0f1114;
+    --accent-bg: rgba(91, 147, 240, 0.16);
+    --accent-border: rgba(91, 147, 240, 0.5);
+
+    --success: #3ecf8e;
+    --success-bg: rgba(62, 207, 142, 0.14);
+    --warning: #e0a94a;
+    --warning-bg: rgba(224, 169, 74, 0.14);
+    --danger: #f2726a;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 12px 34px -8px rgba(0, 0, 0, 0.6);
+    color-scheme: dark;
   }
 }
 
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
+:root[data-theme='dark'] {
+  --bg: #17191c;
+  --surface: #1e2125;
+  --surface-2: #1a1d20;
+  --surface-3: #272b30;
+
+  --border: #2f343a;
+  --border-strong: #3d444c;
+
+  --text-h: #e8ebee;
+  --text: #a2abb4;
+  --text-dim: #78828c;
+
+  --accent: #5b93f0;
+  --accent-hover: #6fa2f5;
+  --accent-fg: #0f1114;
+  --accent-bg: rgba(91, 147, 240, 0.16);
+  --accent-border: rgba(91, 147, 240, 0.5);
+
+  --success: #3ecf8e;
+  --success-bg: rgba(62, 207, 142, 0.14);
+  --warning: #e0a94a;
+  --warning-bg: rgba(224, 169, 74, 0.14);
+  --danger: #f2726a;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 34px -8px rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 body {
   margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* The UA rule for [hidden] is only `display: none` at the lowest specificity,
+   so any class setting `display` (flex/grid) silently defeats it. Enforce it. */
+[hidden] {
+  display: none !important;
+}
+
+#root {
+  width: 100%;
+  min-height: 100svh;
+  box-sizing: border-box;
+  text-align: left;
 }
 
 h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
+h2,
+h3 {
   color: var(--text-h);
+  font-weight: 600;
+  margin: 0;
 }
 
 h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
 }
+
 h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
 }
+
 p {
   margin: 0;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
+/* ---- controls ---- */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: 0.86rem;
+  color: var(--text-h);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+
+input,
+select,
+textarea {
+  padding: 0.4rem 0.55rem;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+button {
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  font-weight: 500;
   color: var(--text-h);
 }
 
+button:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Primary action */
+button.primary,
+button.pdf-button,
+button.import-button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+button.primary:hover:not(:disabled),
+button.pdf-button:hover:not(:disabled),
+button.import-button:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+::placeholder {
+  color: var(--text-dim);
+}
+
 code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+  font-family: var(--mono);
+  font-size: 0.85em;
+  border-radius: 4px;
+  color: var(--text-h);
+  padding: 2px 5px;
+  background: var(--surface-3);
+}
+
+/* ---- scrollbars: match the grey system instead of the OS default ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }

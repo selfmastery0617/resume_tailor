@@ -42,6 +42,38 @@ _SAME_SITE_MAP = {
 }
 
 
+def has_usable_user_token(raw_value: Any) -> bool:
+    """Return whether a localStorage ``userToken`` contains real auth data.
+
+    DeepSeek creates the key before authentication with a persisted wrapper
+    like ``{"value": null, "__version": 0}``. Checking only that this truthy
+    JSON string exists therefore produces a false-positive connection. Older
+    exports can contain the token as a plain string, so those stay supported.
+    """
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return False
+
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return True
+
+    if isinstance(parsed, dict) and "value" in parsed:
+        return bool(parsed["value"])
+    return bool(parsed)
+
+
+def storage_state_has_usable_user_token(state: dict[str, Any]) -> bool:
+    """Check DeepSeek's localStorage entry without exposing its value."""
+    return any(
+        item.get("name") == USER_TOKEN_KEY
+        and has_usable_user_token(item.get("value"))
+        for origin in state.get("origins", []) or []
+        if origin.get("origin", "").rstrip("/") == DEEPSEEK_ORIGIN
+        for item in origin.get("localStorage", []) or []
+    )
+
+
 def _normalize_cookie(raw: dict[str, Any]) -> dict[str, Any] | None:
     name = raw.get("name")
     value = raw.get("value")
@@ -183,6 +215,13 @@ def build_storage_state(
     state: dict[str, Any] = {"cookies": cookies, "origins": []}
     if local_storage:
         state["origins"].append({"origin": DEEPSEEK_ORIGIN, "localStorage": local_storage})
+
+    if not storage_state_has_usable_user_token(state):
+        raise DeepSeekAuthError(
+            "The saved DeepSeek session contains no usable userToken. Open "
+            "Settings and select Connect DeepSeek, then finish signing in and "
+            "wait until the chat screen appears."
+        )
     return state
 
 
@@ -192,19 +231,5 @@ def session_status() -> dict[str, Any]:
         state = build_storage_state()
     except DeepSeekAuthError as exc:
         return {"connected": False, "detail": str(exc)}
-
-    has_token = any(
-        item.get("name") == USER_TOKEN_KEY
-        for origin in state.get("origins", [])
-        for item in origin.get("localStorage", [])
-    )
-    if not has_token:
-        return {
-            "connected": False,
-            "detail": (
-                "A session was found but it has no userToken, which DeepSeek "
-                "authenticates with. Sign in again to capture a complete session."
-            ),
-        }
 
     return {"connected": True, "detail": "Signed in to DeepSeek."}

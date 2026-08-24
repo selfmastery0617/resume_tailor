@@ -1,8 +1,11 @@
 import asyncio
 import hashlib
+import json
 import os
+import re
+import time
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Callable, List, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -26,12 +29,83 @@ JOBRIGHT_REFERER = "https://jobright.ai/jobs/recommend"
 
 PAGE_SIZE = 10
 MAX_FETCH_ATTEMPTS = 10
+# A role filter throws most of a page away, so the pages needed to reach a
+# limit are several times limit/PAGE_SIZE. The budget scales with what was
+# asked for and stops there: without a ceiling a role that matches nothing
+# would walk the whole feed.
+PAGE_BUDGET_MULTIPLIER = 4
+MAX_FETCH_ATTEMPTS_CEILING = 60
 PAGE_DELAY_SECONDS = 2.0
 RATE_LIMIT_BACKOFF_SECONDS = 10.0
 
+# jobright.ai/jobs/search actually accepts a role (unlike the recommend feed,
+# which only ever returns "for you" jobs with no query parameter at all) --
+# used whenever the caller names roles. Verified in testing that a plain
+# httpx GET here is unreliable: it can return an empty jobList with a
+# different response shape after the first call, while a real browser
+# navigation returned real results every time. So this path goes through the
+# app's existing Playwright browser profile instead of httpx, unlike every
+# other request in this file.
+#
+# No real pagination: also verified in testing that this page always
+# returns ~20 job cards and nothing walks further -- its own pageProps.
+# position comes back as a fixed 20 regardless of what's requested, a
+# different `position` in the URL returns nearly the same jobs reordered
+# rather than a new batch, scrolling triggers no further request, and there
+# is no next-page/load-more control in its DOM. So one request per role is
+# this endpoint's real ceiling; see _fetch_via_search_sync for how that
+# shapes the fetch.
+#
+# NOTE: the alternative filter/update/filter-v2 + recommend/list/jobs
+# workflow (documented by Jobright-side notes as the "real" filtered API)
+# was tried and reverted -- POSTing a filter reliably left the session's
+# list/jobs endpoint 500ing afterward, including for plain unfiltered calls
+# made later (e.g. the sign-in status probe), on a session that had never
+# been touched by filter-v2 before. Confirmed via a real user click, not
+# just isolated testing. Do not re-attempt filter-v2 without confirming
+# Jobright's behavior has changed.
+JOBRIGHT_SEARCH_PATH = "/jobs/search"
+SEARCH_PAGE_TIMEOUT_MS = 30_000
+SEARCH_PAGE_DELAY_SECONDS = 2.0
+_NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.DOTALL
+)
+
 # TODO: temporary cap for faster testing -- remove (or raise) once ready to
 # pull the full recommendation feed.
+# Default when a caller does not say. The import dialog always does.
 MAX_JOBS_LIMIT = 10
+
+# (scanned, matched, listing_or_None) — called as the feed is walked, so the UI
+# can count progress and show rows as they arrive rather than after the lot.
+ProgressCallback = Callable[[int, int, "JobListing | None"], None]
+CancelCheck = Callable[[], bool]
+
+
+def _title_matches(title: str, roles: Sequence[str] | None) -> bool:
+    """Whether a job title matches any requested role.
+
+    Substring, case-insensitive, on any of the roles: "Data Engineer" is meant
+    to catch "Senior Data Engineer II" without anyone writing a pattern. No
+    roles means everything matches.
+    """
+    wanted = [r.strip().casefold() for r in (roles or []) if r.strip()]
+    if not wanted:
+        return True
+    haystack = (title or "").casefold()
+    return any(role in haystack for role in wanted)
+
+
+def _matches(
+    listing: "JobListing",
+    roles: Sequence[str] | None,
+    exclude_companies: Sequence[str] | None,
+) -> bool:
+    excluded = {c.strip().casefold() for c in (exclude_companies or []) if c.strip()}
+    if (listing.company or "").strip().casefold() in excluded:
+        return False
+    return _title_matches(listing.title, roles)
+
 
 # Tracking/source params stripped from job apply links.
 _TRACKING_PARAMS = {
@@ -177,6 +251,85 @@ def _compose_description(job_result: dict[str, Any]) -> str | None:
     return "\n\n".join(sections) if sections else None
 
 
+def _compose_description_from_search(job_result: dict[str, Any]) -> str | None:
+    """Same idea as _compose_description, for jobs/search's jobResult shape.
+
+    Verified by inspecting a real response: requirements is one flat list
+    here, not qualifications.mustHave/preferredHave the way the recommend
+    feed splits it, and whyJoinUs/benefitsSummaries were not present at all.
+    """
+    sections: list[str] = []
+
+    summary = job_result.get("jobSummary")
+    if summary:
+        sections.append(summary)
+
+    responsibilities = job_result.get("coreResponsibilities") or []
+    if responsibilities:
+        sections.append("Responsibilities:\n" + "\n".join(f"- {item}" for item in responsibilities))
+
+    requirements = job_result.get("requirements") or []
+    if requirements:
+        sections.append("Requirements:\n" + "\n".join(f"- {item}" for item in requirements))
+
+    why_join_us = job_result.get("whyJoinUs")
+    if why_join_us:
+        sections.append(f"Why Join Us:\n{why_join_us}")
+
+    benefits = job_result.get("benefitsSummaries") or []
+    if benefits:
+        sections.append("Benefits:\n" + "\n".join(f"- {item}" for item in benefits))
+
+    return "\n\n".join(sections) if sections else None
+
+
+def _build_search_url(role: str) -> str:
+    """jobs/search's own URL shape, copied from what the site's search box
+    itself navigates to. taxonomyId "00-00-00" is a generic placeholder --
+    verified in testing that the server matches on the "title" text rather
+    than needing a real resolved id, so no separate suggestion-lookup call
+    is needed per role. No `position` param: verified that one doesn't
+    paginate this endpoint (see the module-level note by
+    JOBRIGHT_SEARCH_PATH), so there is nothing useful to pass here.
+    """
+    taxonomy = json.dumps([{"taxonomyId": "00-00-00", "title": role}])
+    params: dict[str, Any] = {
+        "country": "US",
+        "value": role,
+        "searchType": "job_title",
+        "jobTaxonomyList": taxonomy,
+        "locations": "[]",
+    }
+    return f"{JOBRIGHT_SEARCH_PATH}?{urlencode(params)}"
+
+
+def _extract_page_props(html: str) -> dict[str, Any] | None:
+    """pageProps out of the page's own __NEXT_DATA__ script tag, or None if
+    the page didn't render the shape expected (a sign-in redirect, an
+    unexpected layout change, or the degraded response seen in testing)."""
+    match = _NEXT_DATA_RE.search(html)
+    if not match:
+        return None
+    try:
+        next_data = json.loads(match.group(1))
+    except ValueError:
+        return None
+    props = next_data.get("props") if isinstance(next_data, dict) else None
+    page_props = props.get("pageProps") if isinstance(props, dict) else None
+    return page_props if isinstance(page_props, dict) else None
+
+
+def _session_cookie() -> str | None:
+    """The cookie harvested by the sign-in panel, if the user has used it.
+
+    Imported lazily: jobright_session imports this module for its probe, and a
+    module-level import would close the circle.
+    """
+    from app.services.jobright_session import stored_cookie
+
+    return stored_cookie()
+
+
 def _build_headers(cookie: str) -> dict[str, str]:
     return {
         "accept": "application/json, text/plain, */*",
@@ -212,7 +365,11 @@ class JobrightClient:
     """
 
     def __init__(self, cookie: str | None = None, mock_mode: bool | None = None) -> None:
-        self.cookie = cookie or os.getenv("JOBRIGHT_COOKIE")
+        # A sign-in through the Jobright panel wins over the hand-copied
+        # JOBRIGHT_COOKIE, which stays as a fallback so an existing .env setup
+        # keeps working. Read per instance, not at import, so signing in takes
+        # effect on the next import rather than the next restart.
+        self.cookie = cookie or _session_cookie() or os.getenv("JOBRIGHT_COOKIE")
 
         if mock_mode is None:
             env_override = os.getenv("JOBRIGHT_MOCK_MODE")
@@ -224,11 +381,40 @@ class JobrightClient:
 
         self.mock_mode = mock_mode
 
-    async def fetch_jobs(self, query: str = "") -> List[JobListing]:
-        if self.mock_mode:
-            return self._mock_jobs(query)
+    async def fetch_jobs(
+        self,
+        query: str = "",
+        roles: Sequence[str] | None = None,
+        limit: int = MAX_JOBS_LIMIT,
+        exclude_companies: Sequence[str] | None = None,
+        on_progress: ProgressCallback | None = None,
+        should_cancel: CancelCheck | None = None,
+    ) -> List[JobListing]:
+        """Pull matching jobs from the recommendation feed.
 
-        raw_jobs = await self._fetch_all_raw_jobs()
+        `roles` filters titles as they arrive, so paging can stop as soon as
+        `limit` matches are found rather than after fetching everything. This
+        is a client-side filter by necessity: the endpoint is a personalised
+        feed, and there is no way to ask it for a role.
+
+        `on_progress` is called with (scanned, matched, listing_or_None) as the
+        feed is walked, so a caller can show progress and stream rows.
+        """
+        if self.mock_mode:
+            listings = self._mock_jobs(query)
+            listings = [j for j in listings if _matches(j, roles, exclude_companies)][:limit]
+            for index, listing in enumerate(listings, start=1):
+                if on_progress:
+                    on_progress(index, index, listing)
+            return listings
+
+        raw_jobs = await self._fetch_all_raw_jobs(
+            roles=roles,
+            limit=limit,
+            exclude_companies=exclude_companies,
+            on_progress=on_progress,
+            should_cancel=should_cancel,
+        )
         listings = [self._to_job_listing(job) for job in raw_jobs]
 
         if query:
@@ -241,23 +427,100 @@ class JobrightClient:
 
         return listings
 
-    async def _fetch_all_raw_jobs(self) -> list[dict[str, Any]]:
+    async def _fetch_all_raw_jobs(
+        self,
+        roles: Sequence[str] | None = None,
+        limit: int = MAX_JOBS_LIMIT,
+        exclude_companies: Sequence[str] | None = None,
+        on_progress: ProgressCallback | None = None,
+        should_cancel: CancelCheck | None = None,
+    ) -> list[dict[str, Any]]:
         if not self.cookie:
             raise RuntimeError(
-                "JobrightClient: JOBRIGHT_COOKIE is not set. Copy the Cookie "
-                "header from a logged-in request to jobright.ai/jobs/recommend "
-                "(browser devtools -> Network tab) and set it as the "
-                "JOBRIGHT_COOKIE env var, or use mock_mode for testing."
+                "Not signed in to Jobright. Open the Jobright panel from the "
+                "sidebar and sign in, or set the JOBRIGHT_COOKIE env var to a "
+                "Cookie header copied from a logged-in browser request."
             )
 
+        # A role search goes through jobs/search in a real browser first —
+        # see the module-level note on JOBRIGHT_SEARCH_PATH for why. That
+        # endpoint has no real pagination (verified in testing), so it can
+        # only ever supply ~20 results per named role. If that falls short
+        # of `limit`, top up from the recommend feed below, which *does*
+        # paginate for real — same de-dup state carried over, so nothing
+        # already found from the search gets re-added as a "new" match.
+        wanted_roles = [r.strip() for r in (roles or []) if r.strip()]
         all_jobs: list[dict[str, Any]] = []
         seen_companies: set[str] = set()
+        scanned = 0
+
+        if wanted_roles:
+            all_jobs = await asyncio.to_thread(
+                self._fetch_via_search_sync,
+                wanted_roles,
+                limit,
+                exclude_companies,
+                on_progress,
+                should_cancel,
+            )
+            seen_companies = {job["companyTitle"] for job in all_jobs}
+            scanned = len(all_jobs)
+
+            if len(all_jobs) >= limit or (should_cancel and should_cancel()):
+                return all_jobs
+
+            # jobs/search hit its own ceiling (see the comment on
+            # JOBRIGHT_SEARCH_PATH) short of `limit` — fall through to the
+            # recommend feed below to top up the rest.
+
+        return await self._fetch_via_recommend_feed(
+            roles,
+            limit,
+            exclude_companies,
+            on_progress,
+            should_cancel,
+            all_jobs,
+            seen_companies,
+            scanned,
+        )
+
+    async def _fetch_via_recommend_feed(
+        self,
+        roles: Sequence[str] | None,
+        limit: int,
+        exclude_companies: Sequence[str] | None,
+        on_progress: ProgressCallback | None,
+        should_cancel: CancelCheck | None,
+        all_jobs: list[dict[str, Any]],
+        seen_companies: set[str],
+        scanned: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Jobright's personalised feed, paginated for real with the app's
+        own httpx client — unlike jobs/search, this one's `position` param
+        genuinely advances.
+
+        `all_jobs`/`seen_companies`/`scanned` are seed state, not always
+        empty: when a role search already found some matches (see
+        _fetch_all_raw_jobs), this continues from there instead of
+        restarting from zero, so nothing gets counted or matched twice.
+        """
+        if len(all_jobs) >= limit:
+            return all_jobs
+
+        pages_allowed = min(
+            MAX_FETCH_ATTEMPTS_CEILING,
+            max(MAX_FETCH_ATTEMPTS, -(-limit // PAGE_SIZE) * PAGE_BUDGET_MULTIPLIER),
+        )
+
+        excluded = {c.strip().casefold() for c in (exclude_companies or []) if c.strip()}
         position = 0
         refresh = True
         fetch_attempts = 0
 
         async with httpx.AsyncClient(base_url=JOBRIGHT_BASE_URL, timeout=15.0) as client:
-            while fetch_attempts < MAX_FETCH_ATTEMPTS:
+            while fetch_attempts < pages_allowed:
+                if should_cancel and should_cancel():
+                    break
                 fetch_attempts += 1
 
                 try:
@@ -299,9 +562,23 @@ class JobrightClient:
                     company_title = company_result.get("companyName", "N/A")
                     job_link = _clean_job_url(job_result.get("applyLink", "N/A"))
 
+                    scanned += 1
+
+                    # One job per company, as before, and LinkedIn reposts are
+                    # not applyable from here.
                     if company_title in seen_companies or "linkedin.com" in job_link:
                         continue
                     seen_companies.add(company_title)
+
+                    if company_title.strip().casefold() in excluded:
+                        if on_progress:
+                            on_progress(scanned, len(all_jobs), None)
+                        continue
+
+                    if not _title_matches(job_result.get("jobTitle", ""), roles):
+                        if on_progress:
+                            on_progress(scanned, len(all_jobs), None)
+                        continue
 
                     all_jobs.append(
                         {
@@ -319,7 +596,10 @@ class JobrightClient:
                         }
                     )
 
-                    if len(all_jobs) >= MAX_JOBS_LIMIT:
+                    if on_progress:
+                        on_progress(scanned, len(all_jobs), self._to_job_listing(all_jobs[-1]))
+
+                    if len(all_jobs) >= limit:
                         limit_reached = True
                         break
 
@@ -328,6 +608,126 @@ class JobrightClient:
 
                 await asyncio.sleep(PAGE_DELAY_SECONDS)
                 position += PAGE_SIZE
+
+        return all_jobs
+
+    def _fetch_via_search_sync(
+        self,
+        roles: Sequence[str],
+        limit: int,
+        exclude_companies: Sequence[str] | None,
+        on_progress: ProgressCallback | None,
+        should_cancel: CancelCheck | None,
+    ) -> list[dict[str, Any]]:
+        """Sync worker for a role search, run off the event loop via
+        asyncio.to_thread — Playwright's sync API (used here, see the
+        JOBRIGHT_SEARCH_PATH note) is thread-affine and cannot run on the
+        loop thread, the same constraint every browser-driven call in this
+        app works around the same way.
+
+        One page per role, not paginated further: verified in testing that
+        this page has no real pagination to walk. Its own `position`
+        prop is a fixed constant regardless of what's requested (always 20
+        back, whatever was sent), passing a different `position` in the URL
+        returns nearly the same ~20 jobs reordered rather than a new batch,
+        scrolling the loaded page triggers no further network request, and
+        there is no "next page" / "load more" control anywhere in its DOM —
+        exactly 20 job cards render and the page ends. So this endpoint's
+        real capability is "up to ~20 role-matched jobs per role, once" —
+        asking for a higher limit across few roles will end early rather
+        than there being a bug to fix by retrying harder. To get more,
+        the caller needs to widen `roles`, not this function paginate.
+
+        One browser session covers every role: a fresh launch per request
+        would pay Chromium's startup cost far more than the search itself.
+        """
+        from app.services.deepseek import browser as browser_mod
+
+        all_jobs: list[dict[str, Any]] = []
+        seen_companies: set[str] = set()
+        seen_job_ids: set[str] = set()
+        excluded = {c.strip().casefold() for c in (exclude_companies or []) if c.strip()}
+        scanned = 0
+
+        with browser_mod.browser_context(headless=True) as context:
+            page = browser_mod.first_page(context)
+
+            for role in roles:
+                if should_cancel and should_cancel():
+                    return all_jobs
+                if len(all_jobs) >= limit:
+                    return all_jobs
+
+                try:
+                    page.goto(
+                        f"{JOBRIGHT_BASE_URL}{_build_search_url(role)}",
+                        timeout=SEARCH_PAGE_TIMEOUT_MS,
+                        wait_until="domcontentloaded",
+                    )
+                    page_props = _extract_page_props(page.content())
+                except Exception:  # noqa: BLE001 - one role's failure should not sink the others
+                    continue
+
+                if page_props is None:
+                    continue
+
+                job_list = page_props.get("jobList") or []
+                if not job_list:
+                    continue
+
+                for job in job_list:
+                    job_result = job.get("jobResult") or {}
+                    company_result = job.get("companyResult") or {}
+                    company_title = company_result.get("companyName", "N/A")
+                    job_link = _clean_job_url(
+                        job_result.get("applyLink") or job_result.get("url") or "N/A"
+                    )
+                    job_id = job_result.get("jobId")
+
+                    scanned += 1
+
+                    if job_id and job_id in seen_job_ids:
+                        continue
+                    if company_title in seen_companies or "linkedin.com" in job_link:
+                        continue
+                    seen_companies.add(company_title)
+                    if job_id:
+                        seen_job_ids.add(job_id)
+
+                    if company_title.strip().casefold() in excluded:
+                        if on_progress:
+                            on_progress(scanned, len(all_jobs), None)
+                        continue
+
+                    if not _title_matches(job_result.get("jobTitle", ""), [role]):
+                        if on_progress:
+                            on_progress(scanned, len(all_jobs), None)
+                        continue
+
+                    all_jobs.append(
+                        {
+                            "jobLink": job_link,
+                            "companyTitle": company_title,
+                            "jobTitle": job_result.get("jobTitle", "N/A"),
+                            "displayScore": job.get("displayScore"),
+                            "publishTimeDesc": job_result.get("publishTimeDesc"),
+                            "publishTime": job_result.get("publishTime"),
+                            "workModel": job_result.get("workModel"),
+                            "salary": job_result.get("salaryDesc"),
+                            "jobId": job_id,
+                            "location": job_result.get("jobLocation"),
+                            "description": _compose_description_from_search(job_result),
+                        }
+                    )
+
+                    if on_progress:
+                        on_progress(scanned, len(all_jobs), self._to_job_listing(all_jobs[-1]))
+
+                    if len(all_jobs) >= limit:
+                        break
+
+                if role is not roles[-1]:
+                    time.sleep(SEARCH_PAGE_DELAY_SECONDS)
 
         return all_jobs
 
