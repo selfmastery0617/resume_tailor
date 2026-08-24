@@ -15,9 +15,10 @@ import {
   saveTemplateSettings,
 } from "../api/templates";
 import { useActiveProfileSettings } from "../hooks/useActiveProfileSettings";
+import { useSampleResume } from "../hooks/useSampleResume";
 import { ResumePreview } from "../components/ResumePreview";
+import { SampleResumeEditor } from "../components/SampleResumeEditor";
 import { StyleEditor } from "../components/StyleEditor";
-import { SAMPLE_RESUME } from "../resume/sampleData";
 import type {
   Profile,
   ProfileTemplateSettings,
@@ -53,6 +54,8 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
   const { settings: appSettings } = useActiveProfileSettings(active);
   const activeProfileId = appSettings?.resumeProfile || profiles[0]?.id || null;
   const [settings, setSettings] = useState<ProfileTemplateSettings | null>(null);
+  const { sampleResume, setSampleResume } = useSampleResume(active);
+  const [editingSample, setEditingSample] = useState(false);
 
   // Selection and style edits are local until saved, so browsing and tweaking
   // never write to the profile (TM-FR-013).
@@ -145,7 +148,10 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
   // isn't -- a sparse real profile would make a layout look broken when it
   // isn't. Save/Reset/Download PDF below still act on the real active
   // profile; only what's shown in this preview is fixed to the sample.
-  const previewData = SAMPLE_RESUME;
+  // sampleResume is null only while useSampleResume's fetch is in flight --
+  // the loading gate below waits for it too, so previewData is never read
+  // as null past that point.
+  const previewData = sampleResume;
 
   const dirty =
     settings !== null &&
@@ -246,7 +252,7 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
     }
   };
 
-  if (loading) return <p>Loading templates…</p>;
+  if (loading || !previewData) return <p>Loading templates…</p>;
 
   return (
     <div className="templates-page">
@@ -256,6 +262,10 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
             Showing <strong>{activeProfile.name}</strong>
           </span>
         )}
+
+        <button type="button" onClick={() => setEditingSample(true)}>
+          Edit sample data
+        </button>
 
         <div className="templates-actions">
           {/* Both panels collapse so the preview can use the full width. */}
@@ -375,6 +385,13 @@ export function TemplatesPage({ active = true }: TemplatesPageProps) {
           )}
         </aside>
       </div>
+
+      <SampleResumeEditor
+        open={editingSample}
+        initialData={sampleResume}
+        onClose={() => setEditingSample(false)}
+        onSaved={setSampleResume}
+      />
     </div>
   );
 }

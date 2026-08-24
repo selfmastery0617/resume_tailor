@@ -2,8 +2,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.layout import LayoutError, default_layout, dump_layout
+from app.schemas.resume import ResumeData
 from app.schemas.style import ResumeStyle
 from app.schemas.template import TemplateDefinition, TemplateListResponse
+from app.services import sample_resume_service
 from app.services.templates import store
 from app.services.templates.registry import get_template, list_templates
 from app.services.templates.store import TemplateNotFound, TemplateReadOnly
@@ -58,6 +60,24 @@ def get_templates(include_inactive: bool = False):
 def get_default_layout():
     """Starting document for a new template, so the builder need not hardcode it."""
     return dump_layout(default_layout())
+
+
+# Registered before /{template_id} below, on purpose: FastAPI matches routes
+# in registration order, and "sample-resume" would otherwise be swallowed as
+# a template_id path param.
+@router.get("/sample-resume", response_model=ResumeData)
+def get_sample_resume():
+    return sample_resume_service.get_sample_resume()
+
+
+@router.put("/sample-resume", response_model=ResumeData)
+def put_sample_resume(payload: ResumeData):
+    return sample_resume_service.save_sample_resume(payload)
+
+
+@router.post("/sample-resume/reset", response_model=ResumeData)
+def reset_sample_resume():
+    return sample_resume_service.reset_sample_resume()
 
 
 @router.post("", response_model=TemplateDefinition, status_code=201)

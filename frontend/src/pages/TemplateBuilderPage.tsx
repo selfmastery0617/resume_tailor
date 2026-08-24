@@ -14,7 +14,9 @@ import {
   updateTemplate,
 } from "../api/builder";
 import { fetchTemplates } from "../api/templates";
+import { useSampleResume } from "../hooks/useSampleResume";
 import { ResumePreview } from "../components/ResumePreview";
+import { SampleResumeEditor } from "../components/SampleResumeEditor";
 import { APPROVED_FONTS } from "../resume/fonts";
 import type {
   Flow,
@@ -70,7 +72,6 @@ import {
   type FlowScope,
 } from "../resume/layoutOps";
 import { PAPER_OPTIONS, pageGeometry } from "../resume/pageGeometry";
-import { SAMPLE_RESUME } from "../resume/sampleData";
 import type { ResumeStyle, TemplateDefinition } from "../resume/types";
 
 interface TemplateBuilderPageProps {
@@ -88,6 +89,8 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const { sampleResume, setSampleResume } = useSampleResume(active);
+  const [editingSample, setEditingSample] = useState(false);
   const selectedIdRef = useRef<string | null>(null);
   const saveSequence = useRef(0);
 
@@ -144,8 +147,11 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
 
   // Always sample data, deliberately -- see the matching note in
   // TemplatesPage.tsx. A real profile is often sparse and would make a
-  // layout under construction look broken when it isn't.
-  const previewData = SAMPLE_RESUME;
+  // layout under construction look broken when it isn't. Null only while
+  // useSampleResume's fetch is in flight -- both render blocks below that
+  // use it are already gated on other conditions, so this just adds one
+  // more rather than needing a page-wide loading gate.
+  const previewData = sampleResume;
   const effectiveStyle = useMemo<ResumeStyle | null>(() => {
     if (!systemStyle) return null;
     return { ...systemStyle, ...draftStyle } as ResumeStyle;
@@ -316,6 +322,9 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
             <option key={template.id} value={template.id}>{template.name}</option>
           ))}
         </select>
+        <button type="button" onClick={() => setEditingSample(true)}>
+          Edit sample data
+        </button>
         <div className="templates-actions">
           {dirty && <span className="unsaved-badge">Unsaved changes</span>}
           <button type="button" onClick={() => open(selected)} disabled={!dirty || busy}>Cancel</button>
@@ -341,7 +350,7 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
         </p>
       )}
 
-      {draft && effectiveStyle && !v2Draft && (
+      {draft && effectiveStyle && !v2Draft && previewData && (
         <div className="builder-layout builder-layout--legacy">
           <aside className="builder-structure builder-legacy" aria-label="Legacy template upgrade">
             <h2>Previous builder format</h2>
@@ -370,7 +379,7 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
         </div>
       )}
 
-      {v2Draft && effectiveStyle && (
+      {v2Draft && effectiveStyle && previewData && (
         <div className="builder-layout">
           <TemplateStructureEditor
             layout={v2Draft}
@@ -473,6 +482,13 @@ export function TemplateBuilderPage({ active = true }: TemplateBuilderPageProps)
           </aside>
         </div>
       )}
+
+      <SampleResumeEditor
+        open={editingSample}
+        initialData={sampleResume}
+        onClose={() => setEditingSample(false)}
+        onSaved={setSampleResume}
+      />
     </div>
   );
 }

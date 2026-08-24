@@ -1906,6 +1906,10 @@ button.danger:disabled {
 
 .exp-modal { max-width: 780px; }
 
+.sample-resume-modal { max-width: 900px; }
+.sample-resume-modal .modal-body { white-space: normal; }
+.sample-resume-modal .settings-section:first-child { margin-top: 0; }
+
 .exp-section { margin-bottom: 1.25rem; }
 
 .exp-section h3 {
