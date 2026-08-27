@@ -39,10 +39,9 @@ import {
 import { extractExperience, fetchAllExperience, type ExperienceResult } from "../api/experience";
 import { fetchSettledSessionStatus } from "../api/deepseek";
 import type { Job } from "../types/job";
-import { InfoModal } from "../components/InfoModal";
 import { UrlCellRenderer } from "../components/UrlCellRenderer";
 import { ResumeCellRenderer, type ResumeGridContext } from "../components/ResumeCellRenderer";
-import { DescriptionActionCell } from "../components/jobs/DescriptionActionCell";
+import { DescriptionPopupEditor } from "../components/jobs/DescriptionPopupEditor";
 import { ImportJobsDialog } from "../components/jobs/ImportJobsDialog";
 import { RowDeleteCell, type RowDeleteContext } from "../components/jobs/RowDeleteCell";
 import { StatusCellRenderer, type StatusContext } from "../components/jobs/StatusCell";
@@ -91,7 +90,6 @@ const COLUMN_IDS = [
   "company",
   "title",
   "url",
-  "location",
   "description",
   "resume",
   "status",
@@ -103,14 +101,78 @@ const EDITABLE = new Set([
   "title",
   "company",
   "url",
-  "location",
   "status",
   "description",
 ]);
 
 /** Cleared by Delete. Status is excluded: it can never go back to empty. */
-const CLEARABLE = ["date_added", "title", "company", "url", "location", "description"];
+const CLEARABLE = ["date_added", "title", "company", "url", "description"];
 
+/** Splits a pasted TSV block into rows of cells, understanding Excel's own
+ *  quoting: a field that itself contains a tab, a newline, or a quote comes
+ *  wrapped in "double quotes" (doubled `""` for a literal quote inside), so
+ *  a multi-line description sitting alongside company/title/url in one
+ *  paste is still one field -- its embedded newlines must not be read as
+ *  row breaks the way an unquoted `\n` is. A naive `split("\n")` /
+ *  `split("\t")` cannot tell the difference; this walks the text char by
+ *  char, tracking quote state, instead.
+ */
+function parseTsvMatrix(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  let i = 0;
+  while (i < text.length) {
+    const char = text[i];
+    if (inQuotes) {
+      if (char === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i += 2;
+        } else {
+          inQuotes = false;
+          i += 1;
+        }
+      } else {
+        field += char;
+        i += 1;
+      }
+      continue;
+    }
+    if (char === '"' && field === "") {
+      inQuotes = true;
+      i += 1;
+    } else if (char === "\t") {
+      row.push(field);
+      field = "";
+      i += 1;
+    } else if (char === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+      i += 1;
+    } else {
+      field += char;
+      i += 1;
+    }
+  }
+  row.push(field);
+  rows.push(row);
+  return rows;
+}
+
+/** The write side of parseTsvMatrix's quoting: wraps a field in double
+ *  quotes (doubling any quote inside it) when it contains a tab, a newline,
+ *  or a quote of its own -- otherwise a multi-line description copied
+ *  alongside other columns would come back out as several unquoted lines,
+ *  ambiguous with real row breaks the next time it's parsed (by this page,
+ *  Excel, or anything else reading TSV).
+ */
+function quoteTsvField(value: string): string {
+  return /[\t\n"]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
 
 interface JobsPageProps {
   /** Changes when the DeepSeek session may have, so the banner re-checks
@@ -129,7 +191,6 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
   const [resumeResults, setResumeResults] = useState<Record<string, TailoredResume>>({});
   const [experienceExtracting, setExperienceExtracting] = useState<Map<string, number>>(new Map());
   const [resumeGenerating, setResumeGenerating] = useState<Map<string, number>>(new Map());
-  const [descriptionModalJob, setDescriptionModalJob] = useState<Job | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -263,11 +324,24 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
 
   const copySelection = useCallback(async () => {
     if (!range.range) return;
+    // A lone cell round-trips as raw text (matching the singleCell shortcut
+    // in pasteIntoSelection, and Excel's own behavior of only quoting once
+    // there's more than one field to disambiguate); anything wider needs
+    // quoting so an embedded newline or tab in one field can't be mistaken
+    // for a row or column break when it's parsed again.
+    const isSingleCell = range.range.top === range.range.bottom && range.range.columns.length === 1;
     const lines: string[] = [];
     for (let r = range.range.top; r <= range.range.bottom; r += 1) {
       const job = rows[r];
       if (!job) continue;
-      lines.push(range.range.columns.map((colId) => cellText(job, colId)).join("\t"));
+      lines.push(
+        range.range.columns
+          .map((colId) => {
+            const value = cellText(job, colId);
+            return isSingleCell ? value : quoteTsvField(value);
+          })
+          .join("\t"),
+      );
     }
     const text = lines.join("\n");
     try {
@@ -288,11 +362,29 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     async (text: string) => {
       const anchor = range.anchor;
       if (!anchor) return;
-      const matrix = text
-        .replace(/\r\n?/g, "\n")
-        .replace(/\n$/, "")
-        .split("\n")
-        .map((line) => line.split("\t"));
+      const normalized = text.replace(/\r\n?/g, "\n").replace(/\n$/, "");
+
+      // A single selected description cell is virtually always a paragraph
+      // of prose, not a copied spreadsheet block -- its line breaks belong
+      // in the text, not read as row delimiters the way the matrix paste
+      // below treats them (each \n starting a new job row). The absence of
+      // any tab still lets a genuine multi-column block anchored here fall
+      // through to that behavior instead.
+      const singleCell =
+        !!range.range &&
+        range.range.top === range.range.bottom &&
+        range.range.columns.length === 1 &&
+        range.range.columns[0] === anchor.colId;
+      if (singleCell && anchor.colId === "description" && !normalized.includes("\t")) {
+        const job = rows[anchor.rowIndex];
+        if (!job) return;
+        setError(null);
+        await applyEdit(job, "description", normalized);
+        setNotice("Pasted.");
+        return;
+      }
+
+      const matrix = parseTsvMatrix(normalized);
       if (!matrix.length) return;
 
       const startCol = COLUMN_IDS.indexOf(anchor.colId);
@@ -341,7 +433,7 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
           `${created} created, ${updated} updated.`,
       );
     },
-    [range.anchor, rows, reload],
+    [range.anchor, range.range, rows, reload, applyEdit],
   );
 
   const clearSelection = useCallback(async () => {
@@ -586,20 +678,6 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     }
   }, []);
 
-  const saveDescription = useCallback(
-    async (job: Job, text: string) => {
-      setError(null);
-      try {
-        const updated = await updateJob(job.id, { description: text });
-        setJobs((prev) => prev.map((j) => (j.id === job.id ? updated : j)));
-      } catch (err) {
-        setError(describeError(err, "Could not save the description."));
-        throw err;
-      }
-    },
-    [],
-  );
-
   const changeStatus = useCallback(
     async (job: Job, status: string) => {
       if (!status) return;
@@ -737,21 +815,18 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
         ...selectable("url"),
       },
       {
-        colId: "location",
-        field: "location",
-        headerName: "Location",
-        flex: 1,
-        minWidth: 120,
-        editable: true,
-        ...selectable("location"),
-      },
-      {
         colId: "description",
+        field: "description",
         headerName: "Description",
-        width: 160,
-        editable: false,
-        sortable: false,
-        cellRenderer: DescriptionActionCell,
+        flex: 1,
+        minWidth: 160,
+        editable: true,
+        // Too long for the grid's default one-line editor -- any way of
+        // starting an edit (double-click, typing over a selected cell, F2)
+        // opens the tooltip-style popup instead (DescriptionPopupEditor).
+        cellEditor: DescriptionPopupEditor,
+        cellEditorPopup: true,
+        cellEditorPopupPosition: "under",
         ...selectable("description"),
       },
       {
@@ -790,11 +865,7 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     ];
   }, [range]);
 
-  const gridContext: ResumeGridContext &
-    RowDeleteContext &
-    StatusContext & {
-      onOpenDescription: (job: Job) => void;
-    } = {
+  const gridContext: ResumeGridContext & RowDeleteContext & StatusContext = {
     experienceExtracting,
     experienceResults,
     resumeGenerating,
@@ -802,7 +873,6 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     bulkRunning: bulkGenerating,
     onGenerateResume: handleGenerateResume,
     onOpenFolder: handleOpenFolder,
-    onOpenDescription: setDescriptionModalJob,
     deletingRows,
     onDeleteRow: deleteRow,
     onChangeStatus: changeStatus,
@@ -924,17 +994,6 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
         onStart={handleStartImport}
         onCancel={handleCancelImport}
         onClose={() => setImportOpen(false)}
-      />
-
-      <InfoModal
-        job={descriptionModalJob}
-        bodyText={descriptionModalJob?.description}
-        onClose={() => setDescriptionModalJob(null)}
-        onSave={
-          descriptionModalJob
-            ? (text) => saveDescription(descriptionModalJob, text)
-            : undefined
-        }
       />
     </div>
   );
