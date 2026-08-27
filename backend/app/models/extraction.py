@@ -104,8 +104,8 @@ extraction_roles = Table(
     Column("product_name", Text, nullable=False, server_default=text("''")),
     Column("timeline", Text, nullable=False, server_default=text("''")),
     Column("company_summary", Text, nullable=False, server_default=text("''")),
-    # This role's own headline (e.g. "Senior Data Engineer"), written by
-    # ChatGPT from just this company's bullets -- see _revise_with_chatgpt in
+    # This role's own headline (e.g. "Senior Data Engineer"), finalized by
+    # ChatGPT from a DeepSeek draft -- see _revise_with_chatgpt in
     # experience_service.py. Rendered on the resume as-is, below the company
     # name (product name is left off for now).
     Column("title", Text, nullable=False, server_default=text("''")),

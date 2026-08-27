@@ -18,6 +18,7 @@ feature degrades rather than failing.
 import asyncio
 import json
 import re
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,6 +38,15 @@ JOB1_BULLET_COUNT = 6
 JOB2_BULLET_COUNT = 8
 JOB2_PROJECT_COUNT = 2
 SUMMARY_SENTENCES = 3
+
+# Filled into the tailoring prompt's {role_order} placeholder (see
+# DEFAULT_TAILORING_PROMPT in settings_service.py) so the model can tell
+# these two calls, in the same chat, apart -- job1 is the earlier company,
+# job2 the most recent, matching _select_job1()/_select_job2() below.
+ROLE_ORDER_LABELS = {
+    "job1": "Job 1 of 2 - the first, earlier company on this resume",
+    "job2": "Job 2 of 2 - the most recent company on this resume",
+}
 
 
 class ExperienceExtractionError(RuntimeError):
@@ -70,12 +80,11 @@ class JobSelection:
     product: str
     timeline: str = ""
     company_summary: str = ""
-    # This role's own headline, written by ChatGPT's title turn
-    # (_revise_with_chatgpt / _build_title_message) with the same titlePrompt
-    # as the overall resume title, just scoped to this company's own
-    # bullets. Rendered on the resume as-is, below the company name -- see
-    # build_tailored_data() in tailored_resume_service.py. Product name is
-    # left off there for now.
+    # This role's own headline, finalized by ChatGPT in _revise_with_chatgpt
+    # (step 8) from _draft_titles' step-5 draft, alongside the overall
+    # resume title. Rendered on the resume as-is, below the company name --
+    # see build_tailored_data() in tailored_resume_service.py. Product name
+    # is left off there for now.
     title: str = ""
     projects: list[str] = field(default_factory=list)
     bullets: list[str] = field(default_factory=list)
@@ -403,18 +412,10 @@ def _parse_bullets(reply: str, wanted: int) -> list[str]:
     return lines[:wanted]
 
 
-async def _generate_bullets(
-    chat: "DeepSeekConversation | None",
-    picked: Sequence[ScoredChallenge],
-    selection: JobSelection,
-    job_description: str,
-    count: int,
-) -> tuple[list[str], str]:
-    """Returns (bullets, generator) where generator is 'deepseek' or 'fallback'."""
-    if not picked:
-        return [], "fallback"
-
-    facts = "\n\n".join(
+def _format_achievements(picked: Sequence[ScoredChallenge]) -> str:
+    """Shared by _generate_bullets() and _build_companies_announcement() --
+    same challenge facts, same shape, in both places."""
+    return "\n\n".join(
         f"Challenge {i + 1}:\n"
         f"- Problem: {p.challenge.challenge}\n"
         f"- Action: {p.challenge.action}\n"
@@ -424,6 +425,96 @@ async def _generate_bullets(
         f"- Seniority: {p.challenge.seniority_indicator}"
         for i, p in enumerate(picked)
     )
+
+
+def _build_companies_announcement(
+    job1: JobSelection,
+    job1_picked: Sequence[ScoredChallenge],
+    job2: JobSelection,
+    job2_picked: Sequence[ScoredChallenge],
+) -> str:
+    """Step 2: one message, right after skills, that lays out both companies
+    and their challenges together before either one's bullets are asked for.
+
+    Without this, the two per-company bullet prompts (_generate_bullets, each
+    with its own {role_order} label) are the model's ONLY signal for which
+    company is which -- it never sees them side by side. This message gives
+    it that full picture once, up front, so "the first company" / "the most
+    recent company" in every later prompt in this chat refers back to
+    something it already has in context, not just a label repeated in
+    isolation each time.
+    """
+
+    def block(label: str, selection: JobSelection, picked: Sequence[ScoredChallenge]) -> str:
+        return (
+            f"{label}: {selection.company} / {selection.product}\n\n"
+            f"{_format_achievements(picked)}"
+        )
+
+    return (
+        "Here is the candidate's experience for this resume, both companies "
+        "that will go on it, in order. In every prompt after this one, I'll "
+        "refer to them as \"the first company\" and \"the most recent "
+        "company\" -- keep track of which is which from here:\n\n"
+        + block(ROLE_ORDER_LABELS["job1"], job1, job1_picked)
+        + "\n\n---\n\n"
+        + block(ROLE_ORDER_LABELS["job2"], job2, job2_picked)
+        + "\n\nReply with just \"Ready.\" once you've reviewed both."
+    )
+
+
+async def _announce_companies(
+    chat: "DeepSeekConversation | None",
+    job1: JobSelection,
+    job1_picked: Sequence[ScoredChallenge],
+    job2: JobSelection,
+    job2_picked: Sequence[ScoredChallenge],
+) -> None:
+    """Sends _build_companies_announcement() and moves on regardless of what
+    comes back -- there's nothing to parse here, the point is only to put
+    both companies in the chat's context before bullet generation starts.
+    Like every other step, a failure here must not fail the extraction: the
+    per-company prompts still carry their own achievements and {role_order}
+    label, so losing this priming step just means slightly less context, not
+    broken output.
+    """
+    if chat is None or (not job1_picked and not job2_picked):
+        return
+
+    progress.emit(
+        "announce",
+        "Introducing both companies and their challenges to the chat…",
+        level="step",
+    )
+    try:
+        await chat.ask(_build_companies_announcement(job1, job1_picked, job2, job2_picked))
+    except Exception as exc:  # noqa: BLE001 - provider unavailable
+        progress.emit(
+            "announce",
+            f"Could not send the company introduction ({type(exc).__name__}) — "
+            "continuing without it",
+            level="warn",
+        )
+
+
+async def _generate_bullets(
+    chat: "DeepSeekConversation | None",
+    picked: Sequence[ScoredChallenge],
+    selection: JobSelection,
+    job_description: str,
+    count: int,
+    role_key: str,
+) -> tuple[list[str], str]:
+    """Returns (bullets, generator) where generator is 'deepseek' or 'fallback'.
+
+    role_key is "job1" or "job2" -- see ROLE_ORDER_LABELS, filled into the
+    tailoring prompt's {role_order} so the model can tell which company this
+    call is for when both calls share one chat.
+    """
+    if not picked:
+        return [], "fallback"
+
+    facts = _format_achievements(picked)
 
     # The prompt is user-editable in Settings; fall back to the shipped default
     # if it has been blanked out.
@@ -439,6 +530,7 @@ async def _generate_bullets(
             "count": count,
             "company": selection.company,
             "product": selection.product,
+            "role_order": ROLE_ORDER_LABELS[role_key],
             "job_description": job_description[:4000],
             "achievements": facts,
         },
@@ -479,6 +571,11 @@ async def _generate_bullets(
             "generate",
             f"DeepSeek returned only {len(bullets)} usable lines — composing from source instead",
             level="warn",
+            # Nothing else logs what the reply actually said on this path, so a
+            # bad-shaped reply (prose instead of a list, a refusal, ...) was
+            # previously undiagnosable after the fact -- this is what it looked
+            # like before parsing filtered it down to `bullets`.
+            preview=reply[:300],
         )
     except Exception as exc:  # noqa: BLE001 - provider unavailable or session expired
         progress.emit(
@@ -804,13 +901,23 @@ def _clean_title(reply: str) -> str:
         candidate = line.strip().lstrip("*-# ").strip()
         if not candidate:
             continue
-        # Drop a "Title:" label but keep whatever followed it on the line.
-        for label in ("professional title:", "title:"):
-            if candidate.lower().startswith(label):
-                candidate = candidate[len(label):].strip()
-                break
+        # Drop a leading label ("Title:", "Professional Title:", "Whole
+        # Profile Title:", ...) but keep whatever followed it on the line.
+        # Whitelisting exact labels chases whatever wording a model happens
+        # to invent (observed: "Whole Profile Title:", never asked for) --
+        # any short, colon-terminated prefix is treated as one instead. Real
+        # job titles essentially never start with "word(s):", so this is
+        # safe in practice.
+        candidate = re.sub(r"^[A-Za-z][\w /&-]{0,40}:\s*", "", candidate)
         candidate = candidate.replace("**", "").strip()
         if len(candidate) >= 2 and candidate[0] in "\"“'" and candidate[-1] in "\"”'":
+            candidate = candidate[1:-1].strip()
+        # A title-as-a-whole wrapped in [brackets] (observed: the keyword
+        # marking pass treated the whole title as one keyword) doesn't mean
+        # bold here the way it does in a bullet or the summary -- titles
+        # don't render through RichText/parseBold, so a literal bracket
+        # would otherwise show up in the PDF as-is.
+        if len(candidate) >= 2 and candidate[0] == "[" and candidate[-1] == "]":
             candidate = candidate[1:-1].strip()
         candidate = candidate.rstrip(".").strip()
         if candidate:
@@ -818,6 +925,105 @@ def _clean_title(reply: str) -> str:
             # sentence. Anything that long is prose, not a headline.
             return candidate[:80]
     return ""
+
+
+def _build_titles_message(
+    job1: JobSelection,
+    job2: JobSelection,
+    summary: str,
+    current_title: str,
+    job_description: str,
+    job_title: str,
+    title_prompt: str,
+) -> str:
+    """One message asking for all three titles at once -- the resume-wide
+    headline and each company's own -- so drafting them costs one DeepSeek
+    turn instead of three. Renders titlePrompt with the combined bullets
+    (job2 first, most recent); titlePrompt's own rules already say what's
+    wanted (one overall title, one per company), so no fixed format request
+    is appended here. Nothing downstream parses this reply -- it's folded
+    as unstructured text into what step 8 sends ChatGPT (see _draft_titles),
+    which is what actually asks for -- and gets -- clean, separated lines.
+    """
+    from app.services import settings_service
+
+    bullets = [*job2.bullets, *job1.bullets]
+    return settings_service.render_template(
+        title_prompt,
+        {
+            "job_title": job_title or "this role",
+            "current_title": current_title or "",
+            "job_description": job_description[:4000],
+            "summary": summary,
+            "bullets": "\n".join(f"- {b}" for b in bullets),
+        },
+    )
+
+
+async def _draft_titles(
+    chat: "DeepSeekConversation | None",
+    job1: JobSelection,
+    job2: JobSelection,
+    summary: str,
+    current_title: str,
+    job_description: str,
+    job_title: str,
+) -> str:
+    """Step 5: a first draft of all three headlines -- the resume-wide title
+    and each company's own -- in ONE DeepSeek turn. Written once the summary
+    exists so it can draw on it, same reasoning _generate_summary uses for
+    reading the bullets first.
+
+    Deliberately not parsed into three separate fields here. That used to be
+    three separate calls sharing one prompt (once for the resume, once per
+    company), then one call asking for all three at once and splitting the
+    reply apart with a label-matching regex -- and models kept drifting on
+    the label wording no matter how the request was worded (observed: the
+    generic "Job 1 Title:" swapped for the literal company name instead).
+    Rather than chase another label variant, this step's raw reply is folded
+    as-is into what step 8 sends ChatGPT (_build_revision_message), which
+    already has to produce reliable structured output for the bullets,
+    summaries, and skill set -- asking it to also finalize the titles in
+    that SAME structured reply (see _REVISION_SECTION_RE) means only one
+    parse has to succeed, not two. This function's return value is that
+    draft; _parse_revision_reply is what actually extracts the titles the
+    resume ends up using (see _revise_with_chatgpt, and
+    build_tailored_data() in tailored_resume_service.py for the fallback
+    when even that never runs).
+
+    Returns "" if there are no bullets yet, DeepSeek is unavailable, or the
+    call fails -- an empty draft just means ChatGPT is asked to write the
+    titles from scratch in step 8 rather than refine a draft.
+    """
+    from app.services import settings_service
+
+    bullets = [*job2.bullets, *job1.bullets]
+    if not bullets:
+        return ""
+
+    template = (settings_service.get_settings().get("titlePrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_TITLE_PROMPT
+
+    message = _build_titles_message(
+        job1, job2, summary, current_title, job_description, job_title, template
+    )
+
+    progress.emit("title", "Drafting the resume and role titles…", level="step")
+
+    if chat is None:
+        progress.emit("title", "DeepSeek unavailable — no title draft", level="warn")
+        return ""
+
+    try:
+        reply = await chat.ask(message)
+        progress.emit("title", "Titles drafted", level="result", preview=reply[:300])
+        return reply
+    except Exception as exc:  # noqa: BLE001 - provider unavailable
+        progress.emit(
+            "title", f"Title drafting failed ({type(exc).__name__}) — no title draft", level="warn"
+        )
+        return ""
 
 
 def _parse_skill_list(reply: str) -> list[str]:
@@ -914,30 +1120,22 @@ async def _generate_skill_set(
     return [], "none"
 
 
-def _build_revision_message(
+def _assemble_resume_content(
     job1_bullets: Sequence[str],
     job2_bullets: Sequence[str],
     job1_company_summary: str,
     job2_company_summary: str,
     summary: str,
     skill_set: Sequence[str],
-    revision_prompt: str,
 ) -> str:
-    """One message: the resume content, then the user's revision instructions,
-    then a fixed, non-editable request for a reply shaped so it can be parsed
-    back out. Mirrors the existing precedent in _extract_skills_and_mission()
-    of appending structured, non-editable content around a user-editable
-    template, rather than substituting placeholders into it.
-
-    The skill set is sent as DeepSeek wrote it -- a flat list -- and ChatGPT
-    is asked to organize it into categories. The resume renders each
-    category's name bold with its own line break (SkillsContentBlock/
-    SkillsSection in frontend/src/resume/blocks.tsx already do this for any
-    Skill with a real `category`), so categorizing here is what actually
-    produces that, not a text markup convention.
+    """The same structured shape _generate_whole_resume asks DeepSeek to
+    produce (step 7), built here instead by plain string concatenation --
+    the fallback used when that step is unavailable, fails, or its reply
+    doesn't parse. Nothing is lost either way: every fact here already
+    exists in the individually-generated fields regardless of which one
+    produced the final text.
     """
-    content = (
-        "Here is my resume content.\n\n"
+    return (
         f"Job 1 ({len(job1_bullets)} bullets):\n"
         + "\n".join(f"- {b}" for b in job1_bullets)
         + f"\n\nJob 1 Company Summary:\n{job1_company_summary}"
@@ -945,115 +1143,271 @@ def _build_revision_message(
         + "\n".join(f"- {b}" for b in job2_bullets)
         + f"\n\nJob 2 Company Summary:\n{job2_company_summary}"
         + f"\n\nSummary:\n{summary}"
-        + f"\n\nSkill Set:\n{', '.join(skill_set)}\n\n---\n\n"
+        + f"\n\nSkill Set:\n{', '.join(skill_set)}"
     )
-    format_request = (
-        "\n\nReply with the revised version in exactly this format, and "
-        "nothing else (no preamble, no explanation) — keep exactly "
-        f"{len(job1_bullets)} bullets in Job 1 and exactly {len(job2_bullets)} "
-        "in Job 2. For the skill set, sort every skill into 3-6 sensible "
-        "categories (e.g. Languages, Frameworks, Cloud & Infrastructure) — "
-        "use only the skills given, do not add or drop any, and do not "
-        "invent a skill that was not in the list:\n\nJob 1:\n- revised "
-        "bullet\n- revised bullet\n...\n\nJob 1 Company Summary:\n...\n\n"
-        "Job 2:\n- revised bullet\n...\n\nJob 2 Company Summary:\n...\n\n"
-        "Summary:\n...\n\nSkill Set:\nCategory: skill, skill, skill\n"
-        "Category: skill, skill\n..."
-    )
-    return content + revision_prompt + format_request
 
 
-def _build_keyword_message(job1_count: int, job2_count: int, keywords_prompt: str) -> str:
-    """The revision step's follow-up, sent in the SAME chat right after the
-    revision reply -- so unlike _build_revision_message, this does not repeat
-    the resume content: ChatGPT still has the text it just wrote in context.
-    Ends with the same kind of fixed, parseable format request, reusing the
-    revision reply's exact five-section shape so the caller can run the same
-    parser on both replies.
+def _build_whole_resume_message(whole_resume_prompt: str) -> str:
+    """Step 7's message: unlike _build_revision_message (a FRESH ChatGPT
+    chat with none of this in context), this runs in the SAME DeepSeek chat
+    everything was already written in, so it doesn't repaste the bullets,
+    summaries, or skill set -- just the user's own assembly instructions
+    from the Profile page, sent exactly as written, with nothing appended
+    (matching _build_revision_message and _build_keyword_message).
     """
-    format_request = (
-        "\n\nReply with the same text you just gave me, in exactly this "
-        "format and nothing else (no preamble, no explanation) — keep "
-        f"exactly {job1_count} bullets in Job 1 and exactly {job2_count} in "
-        "Job 2, with every keyword now wrapped in square brackets and "
-        "nothing else changed:\n\nJob 1:\n- bullet with [keywords] marked\n"
-        "...\n\nJob 1 Company Summary:\n...\n\nJob 2:\n- bullet with "
-        "[keywords] marked\n...\n\nJob 2 Company Summary:\n...\n\nSummary:\n..."
-    )
-    return keywords_prompt + format_request
+    return whole_resume_prompt
 
 
-def _build_title_message(
-    job1_company: str,
-    job1_product: str,
-    job1_bullets: Sequence[str],
-    job2_company: str,
-    job2_product: str,
-    job2_bullets: Sequence[str],
+async def _generate_whole_resume(
+    chat: "DeepSeekConversation | None",
+    job1: JobSelection,
+    job2: JobSelection,
     summary: str,
-    current_title: str,
-    job_description: str,
-    job_title: str,
-    title_prompt: str,
-) -> str:
-    """The revision step's second follow-up (third turn overall), sent in the
-    SAME chat right after the keyword-marking reply -- titles are generated
-    last, after revision and keyword-marking, so they reflect the FINAL text
-    rather than a pre-revision draft. Reuses titlePrompt -- the same prompt a
-    now-removed DeepSeek step used to render -- for the overall resume
-    title, with its placeholders filled from the just-revised bullets and
-    summary; then asks for two more, one per company, using only that
-    company's own bullets -- same spirit as _generate_company_summary vs
-    _generate_summary.
+    skill_set: Sequence[str],
+) -> tuple[str, str]:
+    """Step 7: DeepSeek assembles the complete resume content from
+    everything already written in this chat -- both companies' bullets and
+    summaries, the overall summary, the skill set -- into the same
+    structured shape ChatGPT's revision step (and _parse_revision_reply)
+    already expect, rather than that shape being built mechanically by
+    _assemble_resume_content.
+
+    Returns (resume_content, source) where source is 'deepseek' or 'none'.
+    On failure, timeout, or an unparseable reply, returns ('', 'none') and
+    the caller falls back to _assemble_resume_content -- nothing is lost,
+    since every fact in what this step would produce already exists in
+    job1/job2/summary/skill_set regardless of whether it runs.
     """
     from app.services import settings_service
 
-    all_bullets = [*job2_bullets, *job1_bullets]
-    rendered = settings_service.render_template(
-        title_prompt,
-        {
-            "job_title": job_title or "this role",
-            "current_title": current_title or "",
-            "job_description": job_description[:4000],
-            "summary": summary,
-            "bullets": "\n".join(f"- {b}" for b in all_bullets),
-        },
-    )
-    job1_bullet_text = "\n".join(f"- {b}" for b in job1_bullets)
-    job2_bullet_text = "\n".join(f"- {b}" for b in job2_bullets)
-    format_request = (
-        "\n\nNow write two more titles using the exact same rules above, one "
-        f"for the {job1_company} role using only its own bullets below, and "
-        f"one for the {job2_company} role the same way -- each about that "
-        "role alone, not the combined experience.\n\n"
-        f"{job1_company} bullets ({job1_product}):\n{job1_bullet_text}\n\n"
-        f"{job2_company} bullets ({job2_product}):\n{job2_bullet_text}\n\n"
-        "Reply with exactly this format and nothing else (no preamble, no "
-        "explanation):\n\nResume Title:\n...\n\nJob 1 Title:\n...\n\n"
-        "Job 2 Title:\n..."
-    )
-    return rendered + format_request
+    if not job1.bullets or not job2.bullets or not summary:
+        return "", "none"
+
+    template = (settings_service.get_settings().get("wholeResumePrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_WHOLE_RESUME_PROMPT
+
+    message = _build_whole_resume_message(template)
+
+    progress.emit("assemble", "Assembling the complete resume from this chat…", level="step")
+
+    if chat is None:
+        progress.emit(
+            "assemble",
+            "DeepSeek unavailable — assembling the resume from the pieces already written",
+            level="warn",
+        )
+        return "", "none"
+
+    try:
+        reply = await chat.ask(message)
+        parsed = _parse_final_reply(
+            reply, len(job1.bullets), len(job2.bullets), job1.company, job2.company
+        )
+        if parsed is not None:
+            progress.emit("assemble", "Resume assembled", level="result")
+            return reply, "deepseek"
+        progress.emit(
+            "assemble",
+            "DeepSeek's assembly did not parse — assembling the resume "
+            "from the pieces already written instead",
+            level="warn",
+            preview=reply[:300],
+        )
+    except Exception as exc:  # noqa: BLE001 - provider unavailable
+        progress.emit(
+            "assemble",
+            f"Resume assembly failed ({type(exc).__name__}) — assembling "
+            "the resume from the pieces already written instead",
+            level="warn",
+        )
+    return "", "none"
 
 
-# Tolerant of "Job 1:" / "Job1" / "JOB 1 -", any case, any amount of
-# whitespace between label and colon — the model is asked for this exact
-# shape, but chat models still drift on punctuation. The company-summary and
-# skill-set sections are each wrapped in their own optional (?:...)? group:
-# they're newer and easier for a model to drop from a now-six-section format
-# than the original three ever were, and if that happens this must still
-# match on job1/job2/summary alone rather than fail the whole reply over
-# missing extras. `summary` itself is non-greedy (.*?, not .*) precisely so
-# it stops before a following Skill Set section instead of swallowing it --
-# with nothing after it, it still reaches right to the end of the text.
-_REVISION_SECTION_RE = re.compile(
-    r"job\s*1\s*[:\-]?\s*(?P<job1>.*?)\s*"
-    r"(?:job\s*1\s*company\s*summary\s*[:\-]?\s*(?P<job1_summary>.*?)\s*)?"
-    r"job\s*2\s*[:\-]?\s*(?P<job2>.*?)\s*"
-    r"(?:job\s*2\s*company\s*summary\s*[:\-]?\s*(?P<job2_summary>.*?)\s*)?"
-    r"summary\s*[:\-]?\s*(?P<summary>.*?)\s*"
-    r"(?:skill\s*set\s*[:\-]?\s*(?P<skill_set>.*))?$",
-    re.IGNORECASE | re.DOTALL,
-)
+def _build_revision_message(resume_content: str, revision_prompt: str) -> str:
+    """One message: the resume content -- DeepSeek's own step-7 assembly, or
+    _assemble_resume_content's programmatic fallback -- then the user's
+    revision instructions from the Profile page, exactly as written. No
+    fixed format request is appended here -- only the content and the
+    prompt as edited, nothing added to it.
+
+    Because nothing here asks ChatGPT to reply in the labeled shape
+    _parse_revision_reply looks for, that parse will often fail and this
+    step will often come back as applied=False, keeping DeepSeek's own
+    text -- see _revise_with_chatgpt's docstring. That's expected, not a
+    bug to fix: this function sends only what's asked for.
+    """
+    return f"Here is my resume content.\n\n{resume_content}\n\n---\n\n{revision_prompt}"
+
+
+def _build_keyword_message(keywords_prompt: str) -> str:
+    """The revision step's follow-up, sent in the SAME chat right after the
+    revision reply -- so unlike _build_revision_message, this does not repeat
+    the resume content: ChatGPT still has the text it just wrote in context.
+    Sends the user's keywordsPrompt from the Profile page exactly as
+    written, with nothing appended -- no fixed format request. Whatever
+    shape the reply comes back in, _parse_revision_reply's tolerant, no
+    minimum-count matching (see its docstring) is what actually extracts it.
+    """
+    return keywords_prompt
+
+
+def _label_variants(position: str, company: str) -> str:
+    """Alternation of every wording a model might use for one position's
+    plain section label. Models substitute unpredictably regardless of
+    which is actually asked for -- observed, each in its own reply: the
+    company name in place of "Job 1 Title"; the reverse, "Job 1" in place
+    of the company name; and, with nothing in the prompt saying what to
+    call each company's section at all, a literal unfilled template
+    marker -- "<Job 2 Company name>:" verbatim, not a real label of any
+    kind. Tolerating all three is more robust than insisting on one.
+    """
+    generic = rf"job\s*{position}"
+    placeholder = rf"<\s*{generic}(?:\s*company)?(?:\s*name)?\s*>"
+    alternatives = [generic, placeholder]
+    company = company.strip()
+    if company:
+        alternatives.append(re.escape(company))
+    return "(?:" + "|".join(alternatives) + ")"
+
+
+def _revision_label_regex(job1_company: str, job2_company: str) -> re.Pattern:
+    r"""One pattern, a named group per section label, used to locate every
+    labeled section in a reply wherever it actually falls -- not a fixed
+    expected sequence. Built per call, not precompiled at module level,
+    because the label alternatives depend on which two companies this run
+    is about.
+
+    Without a format request telling it what order to answer in (see
+    _build_revision_message), a model reorganizes freely -- observed
+    directly: title/summary/skills first, most-recent company first,
+    "Job 2 Company Summary" before Job 2's own bullets rather than after.
+    A single sequential pattern assuming one fixed order fails the whole
+    reply the moment the actual order differs, even though every section is
+    right there. This finds each label independently instead; the caller
+    (_split_labeled_sections) sorts the hits by where they actually land.
+
+    More specific labels (a company's own "Company Summary" / "Title") are
+    listed before that company's bare label, so a match at the same
+    starting position prefers the specific one -- alternation tries
+    left-to-right and stops at the first success, so this ordering is what
+    keeps "Job 2 Company Summary" from being claimed by the bare "Job 2"
+    pattern instead.
+
+    Every alternative is anchored to the start of a line (`^`, MULTILINE).
+    Without that, a bare company name matches ANY mention of it anywhere in
+    the reply -- including inside the summary's own prose, wrapped as a
+    [keyword] (observed directly: "...across [Snowflake] and..." in the
+    Summary section was mistaken for the "Snowflake:" heading itself, since
+    it's literally the first occurrence of that word in the document). A
+    real section heading always starts its own line; a `* bullet` mentioning
+    the company mid-sentence never does, and neither does inline prose --
+    so anchoring to line-start is what tells them apart. `\s*` after `^`
+    allows leading spaces but not a bullet marker, so a bullet that happens
+    to start with the company's name doesn't get mistaken for a heading
+    either.
+
+    The bare job1/job2 alternatives additionally consume the rest of their
+    line up to a colon (`[^\n:]*`), not just the bare token -- a model
+    sometimes expands the heading into a fuller name (observed: "Snowflake
+    Data Cloud:" for a company whose corpus name is just "Snowflake").
+    Without this, the match stops right after "Snowflake" and " Data
+    Cloud:" is left dangling as if it were that company's own content,
+    which then swallows the real title line right after it.
+    """
+    job1_label = _label_variants("1", job1_company)
+    job2_label = _label_variants("2", job2_company)
+    parts = [
+        rf"^\s*(?P<job1_summary>{job1_label}\s*(?:company\s*)?summary\s*[:\-]?)",
+        rf"^\s*(?P<job2_summary>{job2_label}\s*(?:company\s*)?summary\s*[:\-]?)",
+        rf"^\s*(?P<job1_title>{job1_label}\s*title\s*[:\-]?)",
+        rf"^\s*(?P<job2_title>{job2_label}\s*title\s*[:\-]?)",
+        r"^\s*(?P<resume_title>resume\s*title\s*[:\-]?)",
+        r"^\s*(?P<skill_set>skill\s*set\s*[:\-]?)",
+        r"^\s*(?P<summary>summary\s*[:\-]?)",
+        rf"^\s*(?P<job1>{job1_label}[^\n:]*[:\-]?)",
+        rf"^\s*(?P<job2>{job2_label}[^\n:]*[:\-]?)",
+    ]
+    return re.compile("|".join(parts), re.IGNORECASE | re.MULTILINE)
+
+
+def _split_labeled_sections(text: str, job1_company: str, job2_company: str) -> dict[str, str]:
+    """Every labeled section found in `text`, keyed by field name, mapped to
+    the text between that label and whichever label comes next in the
+    reply -- in whatever order they actually appear. First occurrence of a
+    given label wins if a model repeats one.
+    """
+    pattern = _revision_label_regex(job1_company, job2_company)
+    hits = [
+        (next(name for name, value in m.groupdict().items() if value is not None), m.start(), m.end())
+        for m in pattern.finditer(text)
+    ]
+    sections: dict[str, str] = {}
+    for i, (name, _start, end) in enumerate(hits):
+        content_end = hits[i + 1][1] if i + 1 < len(hits) else len(text)
+        if name not in sections:
+            sections[name] = text[end:content_end].strip()
+    return sections
+
+
+_BULLET_LINE_RE = re.compile(r"^(?:[-*•●◦▪▸]\s+|\d+[.)]\s*)")
+
+
+def _split_bullets_and_prose(text: str, count: int) -> tuple[list[str], str]:
+    """Bullets and prose summary pulled from the SAME span, rather than
+    assuming bullets and the company summary always land in separate,
+    separately-labeled sections. Observed directly: a company's summary
+    paragraph immediately followed by its bullets with nothing labeling
+    where the bullets begin -- both ended up in that company's "Company
+    Summary" section once split by label alone.
+
+    Deliberately does NOT reuse _parse_bullets here, tempting as that
+    looks: _parse_bullets treats any non-empty, non-heading line as a
+    bullet, which is correct for a section that's ONLY ever bullets (its
+    actual job everywhere else in this file) but wrong here, where a
+    prose sentence and a `- bullet` line can sit in the same span --
+    _parse_bullets would count the prose line as a bullet too (observed
+    directly). A line only counts as a bullet here if it actually starts
+    with a bullet or numbered-list marker; everything else is prose.
+    """
+    bullets: list[str] = []
+    prose_lines: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _BULLET_LINE_RE.match(line):
+            cleaned = _BULLET_LINE_RE.sub("", line).strip()
+            if cleaned:
+                bullets.append(cleaned)
+        elif len(line) < 25 and line.endswith(":"):
+            continue  # a stray heading fragment, not prose either
+        else:
+            prose_lines.append(line)
+    return bullets[:count], _clean_summary(" ".join(prose_lines))
+
+
+def _extract_role_title_candidate(bare_span: str) -> tuple[str, str]:
+    """If a company's bare-label span (before its "Company Summary" or
+    "Title" section, if either exists) opens with a short, non-bullet line,
+    treat that line as a candidate role title and split it off -- models
+    sometimes write the title directly under the company name with no
+    "Title:" label at all (observed: "Snowflake:\\n[Data Engineer]\\nJob 1
+    Company Summary: ..."). An explicit "{company} Title:" section, when
+    present, still wins over this candidate -- see _parse_revision_reply.
+
+    Returns (title_candidate, remaining_text) -- title_candidate is "" when
+    the first line doesn't look like a short standalone title (a bullet, or
+    long enough to be prose), in which case remaining_text is bare_span
+    unchanged.
+    """
+    lines = bare_span.splitlines()
+    if not lines:
+        return "", bare_span
+    first = lines[0].strip()
+    if first and len(first) <= 80 and not _BULLET_LINE_RE.match(first):
+        return first, "\n".join(lines[1:])
+    return "", bare_span
 
 
 def _parse_skill_categories(text: str) -> list[tuple[str, list[str]]]:
@@ -1070,6 +1424,14 @@ def _parse_skill_categories(text: str) -> list[tuple[str, list[str]]]:
             continue
         category, _, rest = line.partition(":")
         category = category.strip()
+        # The category name itself is already rendered bold, through its
+        # own dedicated path (SkillsContentBlock/SkillsSection in
+        # frontend/src/resume/blocks.tsx), not through RichText/parseBold's
+        # [bracket] convention -- so a category the keyword-marking pass
+        # also wrapped in brackets (observed: "[Languages]:") would
+        # otherwise show up with literal brackets in the PDF.
+        if len(category) >= 2 and category[0] == "[" and category[-1] == "]":
+            category = category[1:-1].strip()
         skills = [s.strip() for s in rest.split(",") if s.strip()]
         if category and skills:
             groups.append((category, skills))
@@ -1077,81 +1439,183 @@ def _parse_skill_categories(text: str) -> list[tuple[str, list[str]]]:
 
 
 def _parse_revision_reply(
-    reply: str, job1_count: int, job2_count: int
-) -> tuple[list[str], list[str], str, str, str, list[tuple[str, list[str]]]] | None:
+    reply: str, job1_count: int, job2_count: int, job1_company: str = "", job2_company: str = ""
+) -> tuple[list[str], list[str], str, str, str, list[tuple[str, list[str]]], str, str, str] | None:
     """Split a revision reply into (job1 bullets, job2 bullets, job1 company
-    summary, job2 company summary, summary, skill categories), or None when
-    there isn't enough usable content to trust.
+    summary, job2 company summary, summary, skill categories, resume title,
+    job1 title, job2 title), or None when the reply has no structure to
+    extract at all.
 
-    Locates the labeled sections, then reuses the existing tolerant cleaners —
-    _parse_bullets() and _clean_summary() — rather than reimplementing
-    bullet/summary cleanup for a second time.
+    Locates every labeled section independently, in whatever order they
+    actually appear (see _split_labeled_sections) -- tolerant of the
+    company's own name in place of "Job 1"/"Job 2" (see _label_variants).
+    For each company, its bare-label span and its "Company Summary" span
+    are combined before splitting into bullets vs. prose (see
+    _split_bullets_and_prose), since which one actually holds the bullets
+    varies. A title with no explicit "Title:" section falls back to a short
+    first line under the bare label, if there is one (see
+    _extract_role_title_candidate). Reuses the existing tolerant cleaners --
+    _parse_bullets(), _clean_summary(), and _clean_title() -- rather than
+    reimplementing that cleanup for a second time.
 
-    Acceptance is still gated only on job1/job2 bullets and the overall
-    summary, exactly as before this function grew more fields: those three
-    are the resume's core content, and the caller labels the whole run
-    "chatgpt" based on them. The company summaries and skill categories are
-    extracted opportunistically alongside — a model that skips or garbles one
-    of them (they're newer, and a model can drift on a six-section format
-    more easily than a three-section one) shouldn't discard an otherwise good
-    bullets+summary revision. The caller applies each one only when it
-    actually came back non-empty, keeping whatever it had otherwise.
+    Acceptance requires only that job1 or job2's bare label was found at
+    all -- there's no minimum bullet count or "summary must be non-empty"
+    bar on top of it. A reply with real structure is used as-is, however
+    thin; there's no format request in the outgoing message anymore telling
+    ChatGPT what shape or order to answer in (see _build_revision_message),
+    so insisting on a specific count or sequence here would reject good
+    revisions just as readily as bad ones. Missing pieces come back as
+    empty values, and the caller (see _revise_with_chatgpt) already falls
+    back to the pre-revision value for anything that comes back empty.
     """
     text = (reply or "").replace("**", "")
-    match = _REVISION_SECTION_RE.search(text)
-    if not match:
+    sections = _split_labeled_sections(text, job1_company, job2_company)
+    if "job1" not in sections and "job2" not in sections:
         return None
 
-    job1_bullets = _parse_bullets(match.group("job1"), job1_count)
-    job2_bullets = _parse_bullets(match.group("job2"), job2_count)
-    job1_company_summary = _clean_summary(match.group("job1_summary"))
-    job2_company_summary = _clean_summary(match.group("job2_summary"))
-    summary = _clean_summary(match.group("summary"))
-    skill_groups = _parse_skill_categories(match.group("skill_set") or "")
+    job1_title_candidate, job1_bare = _extract_role_title_candidate(sections.get("job1", ""))
+    job2_title_candidate, job2_bare = _extract_role_title_candidate(sections.get("job2", ""))
 
-    # Same acceptance bar _generate_bullets() already uses (line ~437): enough
-    # of what was asked for to trust, not necessarily every last one — there
-    # is no corpus to top up from here, unlike a first-generation bullet.
-    job1_ok = len(job1_bullets) >= max(1, job1_count // 2)
-    job2_ok = len(job2_bullets) >= max(1, job2_count // 2)
-    if not (job1_ok and job2_ok and summary):
-        return None
+    job1_bullets, job1_company_summary = _split_bullets_and_prose(
+        "\n".join(filter(None, [job1_bare, sections.get("job1_summary", "")])), job1_count
+    )
+    job2_bullets, job2_company_summary = _split_bullets_and_prose(
+        "\n".join(filter(None, [job2_bare, sections.get("job2_summary", "")])), job2_count
+    )
+    summary = _clean_summary(sections.get("summary", ""))
+    skill_groups = _parse_skill_categories(sections.get("skill_set", ""))
+    resume_title = _clean_title(sections.get("resume_title", ""))
+    job1_title = _clean_title(sections.get("job1_title", "")) or _clean_title(job1_title_candidate)
+    job2_title = _clean_title(sections.get("job2_title", "")) or _clean_title(job2_title_candidate)
 
-    return job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, skill_groups
-
-
-# Same tolerant-of-punctuation spirit as _REVISION_SECTION_RE, just three
-# sections instead of six.
-_TITLE_SECTION_RE = re.compile(
-    r"resume\s*title\s*[:\-]?\s*(?P<resume>.*?)\s*"
-    r"job\s*1\s*title\s*[:\-]?\s*(?P<job1>.*?)\s*"
-    r"job\s*2\s*title\s*[:\-]?\s*(?P<job2>.*)$",
-    re.IGNORECASE | re.DOTALL,
-)
+    return (
+        job1_bullets, job2_bullets, job1_company_summary, job2_company_summary,
+        summary, skill_groups, resume_title, job1_title, job2_title,
+    )
 
 
-def _parse_title_reply(reply: str) -> tuple[str, str, str] | None:
-    """(resume title, job1 title, job2 title), or None when the reply didn't
-    contain all three labeled sections. Each segment is cleaned with
-    _clean_title, the same cleaner the single DeepSeek title step used
-    before title generation moved into this chat.
+_XML_BLOCK_RE = re.compile(r"<resume\b.*?</resume\s*>", re.IGNORECASE | re.DOTALL)
 
-    Only the resume-wide title gates acceptance -- same "core content vs.
-    opportunistic extras" split _parse_revision_reply uses for the company
-    summaries and skill set. A role title is cosmetic (it's what renders on
-    that section's header, below the company name); losing just one
-    company's title to a parse miss shouldn't cost the resume its headline.
+# A model asked for XML routinely writes a literal "&" -- in a skill
+# category name ("Frameworks & Data Processing"), in prose ("R&D") -- rather
+# than escaping it as "&amp;". That's invalid XML, and ElementTree rejects
+# the WHOLE document over one stray character. Escapes any "&" that isn't
+# already part of a recognized entity reference before parsing.
+_BARE_AMPERSAND_RE = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)")
+
+
+def _xml_text(element: "ET.Element | None") -> str:
+    return (element.text or "").strip() if element is not None else ""
+
+
+def _normalize_company_name(name: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", name.strip().casefold())).strip()
+
+
+def _find_company_element(root: "ET.Element", company: str) -> "ET.Element | None":
+    """The <company name="..."> element matching `company`, tolerant of
+    case and surrounding whitespace -- companies are named directly as an
+    attribute here, so there's no "Job N vs. company name vs. placeholder"
+    ambiguity to resolve the way the label-based parser has to (see
+    _label_variants). ChatGPT sometimes expands or combines the name it was
+    given (e.g. "Snowflake" comes back as "Snowflake / Snowflake Data
+    Cloud"), so an exact match is tried first and a substring match (either
+    direction) after, rather than losing the whole section over a name it
+    embellished.
     """
-    match = _TITLE_SECTION_RE.search((reply or "").replace("**", ""))
+    company_key = _normalize_company_name(company)
+    if not company_key:
+        return None
+    experience = root.find("experience")
+    if experience is None:
+        return None
+    candidates = experience.findall("company")
+    for company_el in candidates:
+        if _normalize_company_name(company_el.get("name") or "") == company_key:
+            return company_el
+    for company_el in candidates:
+        name_key = _normalize_company_name(company_el.get("name") or "")
+        if name_key and (company_key in name_key or name_key in company_key):
+            return company_el
+    return None
+
+
+def _parse_resume_xml(
+    reply: str, job1_count: int, job2_count: int, job1_company: str, job2_company: str
+) -> tuple[list[str], list[str], str, str, str, list[tuple[str, list[str]]], str, str, str] | None:
+    """Parse the <resume>...</resume> XML structure requested by the
+    keywords prompt (see the Profile page's own keywordsPrompt -- this
+    format is only produced when it's actually asked for there, not by
+    DEFAULT_KEYWORDS_PROMPT, which is unrelated and untouched).
+
+    Returns None on any parse failure -- no XML block found, malformed XML,
+    or neither company present -- so the caller (_parse_final_reply) falls
+    back to the tolerant label-based extraction instead (_parse_revision_reply).
+    """
+    match = _XML_BLOCK_RE.search(reply or "")
     if not match:
         return None
-    resume_title = _clean_title(match.group("resume"))
-    if not resume_title:
+    try:
+        root = ET.fromstring(_BARE_AMPERSAND_RE.sub("&amp;", match.group(0)))
+    except ET.ParseError:
         return None
-    return resume_title, _clean_title(match.group("job1")), _clean_title(match.group("job2"))
+
+    job1_el = _find_company_element(root, job1_company)
+    job2_el = _find_company_element(root, job2_company)
+    if job1_el is None and job2_el is None:
+        return None
+
+    def bullets_of(company_el: "ET.Element | None", count: int) -> list[str]:
+        if company_el is None:
+            return []
+        achievements = company_el.find("achievements")
+        if achievements is None:
+            return []
+        return [
+            (b.text or "").strip() for b in achievements.findall("bullet") if b.text and b.text.strip()
+        ][:count]
+
+    skill_groups: list[tuple[str, list[str]]] = []
+    skill_set_el = root.find("skill_set")
+    if skill_set_el is not None:
+        for category_el in skill_set_el.findall("category"):
+            name = (category_el.get("name") or "").strip()
+            skills = [s.strip() for s in (category_el.text or "").split(",") if s.strip()]
+            if name and skills:
+                skill_groups.append((name, skills))
+
+    return (
+        bullets_of(job1_el, job1_count),
+        bullets_of(job2_el, job2_count),
+        _clean_summary(_xml_text(job1_el.find("company_summary")) if job1_el is not None else ""),
+        _clean_summary(_xml_text(job2_el.find("company_summary")) if job2_el is not None else ""),
+        _clean_summary(_xml_text(root.find("summary"))),
+        skill_groups,
+        _clean_title(_xml_text(root.find("resume_title"))),
+        _clean_title(_xml_text(job1_el.find("title")) if job1_el is not None else ""),
+        _clean_title(_xml_text(job2_el.find("title")) if job2_el is not None else ""),
+    )
+
+
+def _parse_final_reply(
+    reply: str, job1_count: int, job2_count: int, job1_company: str = "", job2_company: str = ""
+) -> tuple[list[str], list[str], str, str, str, list[tuple[str, list[str]]], str, str, str] | None:
+    """Try the XML structure first (_parse_resume_xml) -- reliable once the
+    keywords prompt has been set up to ask for it, since an explicit
+    <company name="..."> attribute leaves nothing to guess -- falling back
+    to the tolerant label-based extraction (_parse_revision_reply) for a
+    reply that came back as plain labeled text instead, or from before the
+    prompt asked for XML at all. Same return shape either way, so callers
+    don't need to know or care which one actually matched.
+    """
+    xml_result = _parse_resume_xml(reply, job1_count, job2_count, job1_company, job2_company)
+    if xml_result is not None:
+        return xml_result
+    return _parse_revision_reply(reply, job1_count, job2_count, job1_company, job2_company)
 
 
 async def _revise_with_chatgpt(
+    resume_content: str,
     job1_bullets: list[str],
     job2_bullets: list[str],
     job1_company_summary: str,
@@ -1159,48 +1623,37 @@ async def _revise_with_chatgpt(
     summary: str,
     skill_set: list[str],
     job1_company: str,
-    job1_product: str,
     job2_company: str,
-    job2_product: str,
-    current_title: str,
-    job_description: str,
-    job_title: str,
 ) -> tuple[list[str], list[str], str, str, str, list[tuple[str, list[str]]], str, str, str, bool]:
-    """Step 6, the pipeline's last step: a fresh ChatGPT chat revises the
-    bullets, company summaries, overall summary, and skill set DeepSeek just
-    wrote — sorting the flat skill list into categories along the way — then
-    a second message in that SAME chat (step 6b) asks it to mark the main
-    keywords by wrapping them in [square brackets] -- the PDF renders those
-    bold (RichText/parseBold in frontend/src/resume/format.ts) — then a third
-    message (step 6c) asks for the resume-wide title and each company's own
-    title, generated last so they reflect the FINAL revised-and-marked text
-    rather than a pre-revision draft.
+    """Step 8, the pipeline's last step: a fresh ChatGPT chat revises the
+    bullets, company summaries, overall summary, and skill set -- DeepSeek's
+    own step-7 assembly (resume_content, which also carries step 5's title
+    draft along as unstructured text -- see extract_experience), sorting the
+    flat skill list into categories and finalizing the titles into the same
+    structured reply along the way -- then a second message in that SAME
+    chat (step 8b) asks it to mark the main keywords by wrapping them in
+    [square brackets] -- the PDF renders those bold (RichText/parseBold in
+    frontend/src/resume/format.ts).
 
     Returns (job1_bullets, job2_bullets, job1_company_summary,
     job2_company_summary, summary, skill_groups, resume_title, job1_title,
-    job2_title, applied) — applied=False whenever ChatGPT isn't connected,
-    the call fails, or the revision reply doesn't parse into something
-    usable, in which case every field comes back unchanged (skill_groups
-    empty meaning "stay flat, uncategorized", the three titles empty meaning
-    "no title generated" — see build_tailored_data in
-    tailored_resume_service.py, which falls back to the profile's own title
-    in that case). Like every other step here, this must never fail the
-    extraction: a missing or broken revision just means the resume keeps
-    DeepSeek's own text and titles are left blank.
+    job2_title, applied) — applied=False only when ChatGPT isn't connected,
+    the call fails outright, or the reply has no recognizable structure at
+    all (see _parse_revision_reply). Once there's a structural match,
+    applied=True and every field is taken from it independently -- any
+    field that came back empty (the model found the heading but wrote
+    nothing usable under it) falls back to the pre-revision value instead
+    of overwriting good content with nothing, but that's a per-field
+    substitution, not a reason to discard the run.
 
-    The bullets and overall summary are still accepted or reverted together —
-    generator is one value for the whole run, so a half-revised resume must
-    not be labeled "chatgpt". Each company summary and the skill
-    categorization are applied independently of that (see
-    _parse_revision_reply's docstring): a model that garbles one of the
-    newer sections shouldn't cost the resume an otherwise good
-    bullets+summary revision, or vice versa. The keyword pass is applied the
-    same way: if it fails or doesn't parse, the run keeps the (still
-    successfully revised, still applied=True) un-marked text rather than
-    reverting the whole revision over the keyword step alone. Titles are
-    generated only once both the revision and keyword steps produced
-    something usable -- see build_title_followup below -- since a title for
-    text that's about to be discarded isn't worth asking for.
+    There's no format request in the outgoing message telling ChatGPT what
+    shape to answer in (see _build_revision_message), so this is
+    deliberately permissive: a thin, partial, or oddly-labeled reply is
+    still used rather than rejected, as long as SOMETHING matched. The
+    keyword pass is applied the same way: if it fails or doesn't parse, the
+    run keeps the (still successfully revised, still applied=True) un-marked
+    text rather than reverting the whole revision over the keyword step
+    alone.
 
     Must run after _chat_session()'s conversation has fully closed: ChatGPT
     and DeepSeek share one browser profile, and that block holds the
@@ -1248,45 +1701,22 @@ async def _revise_with_chatgpt(
     if not template:
         template = settings_service.DEFAULT_REVISION_PROMPT
 
-    message = _build_revision_message(
-        job1_bullets, job2_bullets, job1_company_summary, job2_company_summary, summary, skill_set, template
-    )
+    message = _build_revision_message(resume_content, template)
 
     keywords_template = (settings.get("keywordsPrompt") or "").strip()
     if not keywords_template:
         keywords_template = settings_service.DEFAULT_KEYWORDS_PROMPT
 
-    title_template = (settings.get("titlePrompt") or "").strip()
-    if not title_template:
-        title_template = settings_service.DEFAULT_TITLE_PROMPT
-
     def build_keyword_followup(replies: list[str]) -> str | None:
         # Only worth asking to mark keywords in a reply that itself parsed
         # into something usable -- nothing sensible to mark otherwise, and
         # the outer parse below will already revert to DeepSeek's version.
-        parsed = _parse_revision_reply(replies[-1], len(job1_bullets), len(job2_bullets))
-        if parsed is None:
-            return None
-        marked_job1, marked_job2, *_ = parsed
-        return _build_keyword_message(len(marked_job1), len(marked_job2), keywords_template)
-
-    def build_title_followup(replies: list[str]) -> str | None:
-        # Prefer the keyword-marked reply (has the final, bold-marked text);
-        # fall back to the revision reply alone if the keyword step never
-        # sent (build_keyword_followup returned None, which also means this
-        # function is never reached -- see _ask_chained_turns_sync) or its
-        # reply didn't parse.
-        parsed = _parse_revision_reply(replies[-1], len(job1_bullets), len(job2_bullets))
-        if parsed is None and len(replies) > 1:
-            parsed = _parse_revision_reply(replies[0], len(job1_bullets), len(job2_bullets))
-        if parsed is None:
-            return None
-        titled_job1, titled_job2, _, _, titled_summary, _ = parsed
-        return _build_title_message(
-            job1_company, job1_product, titled_job1,
-            job2_company, job2_product, titled_job2,
-            titled_summary, current_title, job_description, job_title, title_template,
+        parsed = _parse_final_reply(
+            replies[-1], len(job1_bullets), len(job2_bullets), job1_company, job2_company
         )
+        if parsed is None:
+            return None
+        return _build_keyword_message(keywords_template)
 
     progress.emit(
         "revision",
@@ -1295,19 +1725,32 @@ async def _revise_with_chatgpt(
     )
 
     try:
-        replies = await chatgpt.ask_chained_turns(
-            message, [build_keyword_followup, build_title_followup]
-        )
+        replies = await chatgpt.ask_chained_turns(message, [build_keyword_followup])
         reply = replies[0]
         keyword_reply = replies[1] if len(replies) > 1 else ""
-        title_reply = replies[2] if len(replies) > 2 else ""
 
-        parsed = _parse_revision_reply(reply, len(job1_bullets), len(job2_bullets))
+        progress.emit(
+            "revision",
+            "ChatGPT's revision reply:",
+            level="info",
+            preview=reply,
+        )
+        if keyword_reply:
+            progress.emit(
+                "revision",
+                "ChatGPT's keyword-marking reply:",
+                level="info",
+                preview=keyword_reply,
+            )
+
+        parsed = _parse_final_reply(
+            reply, len(job1_bullets), len(job2_bullets), job1_company, job2_company
+        )
         if parsed is None:
             progress.emit(
                 "revision",
-                "ChatGPT's revision did not parse into usable bullets and a "
-                "summary — keeping DeepSeek's version",
+                "ChatGPT's revision had no recognizable structure at all — "
+                "keeping DeepSeek's version",
                 level="warn",
             )
             return (
@@ -1315,21 +1758,40 @@ async def _revise_with_chatgpt(
                 summary, [], "", "", "", False,
             )
 
-        new_job1, new_job2, new_job1_summary, new_job2_summary, new_summary, skill_groups = parsed
+        (
+            new_job1, new_job2, new_job1_summary, new_job2_summary, new_summary,
+            skill_groups, resume_title, job1_title, job2_title,
+        ) = parsed
+        # A structural match with an empty section (the model found the
+        # heading but wrote nothing bullet-shaped under it) falls back to
+        # what was already there, same as every other field here -- there's
+        # no format request telling ChatGPT what shape to answer in anymore
+        # (see _build_revision_message), so a thin or malformed section is
+        # expected sometimes, not a reason to lose real content over.
+        new_job1 = new_job1 or job1_bullets
+        new_job2 = new_job2 or job2_bullets
         new_job1_summary = new_job1_summary or job1_company_summary
         new_job2_summary = new_job2_summary or job2_company_summary
+        new_summary = new_summary or summary
 
         keywords_marked = False
         if keyword_reply:
-            keyword_parsed = _parse_revision_reply(keyword_reply, len(new_job1), len(new_job2))
+            keyword_parsed = _parse_final_reply(
+                keyword_reply, len(new_job1), len(new_job2), job1_company, job2_company
+            )
             if keyword_parsed is not None:
-                marked_job1, marked_job2, marked_job1_summary, marked_job2_summary, marked_summary, _ = (
-                    keyword_parsed
-                )
-                new_job1, new_job2 = marked_job1, marked_job2
+                (
+                    marked_job1, marked_job2, marked_job1_summary, marked_job2_summary,
+                    marked_summary, _, marked_resume_title, marked_job1_title, marked_job2_title,
+                ) = keyword_parsed
+                new_job1 = marked_job1 or new_job1
+                new_job2 = marked_job2 or new_job2
                 new_job1_summary = marked_job1_summary or new_job1_summary
                 new_job2_summary = marked_job2_summary or new_job2_summary
                 new_summary = marked_summary or new_summary
+                resume_title = marked_resume_title or resume_title
+                job1_title = marked_job1_title or job1_title
+                job2_title = marked_job2_title or job2_title
                 keywords_marked = True
             else:
                 progress.emit(
@@ -1339,27 +1801,14 @@ async def _revise_with_chatgpt(
                     level="warn",
                 )
 
-        resume_title = job1_title = job2_title = ""
-        if title_reply:
-            title_parsed = _parse_title_reply(title_reply)
-            if title_parsed is not None:
-                resume_title, job1_title, job2_title = title_parsed
-            else:
-                progress.emit(
-                    "revision",
-                    "Title generation did not parse — the resume keeps its "
-                    "existing title",
-                    level="warn",
-                )
-
         progress.emit(
             "revision",
             f"ChatGPT revised {len(new_job1)} + {len(new_job2)} bullets, "
             "the company summaries, the summary"
             + (f", and sorted {sum(len(s) for _, s in skill_groups)} skills into "
                f"{len(skill_groups)} categories" if skill_groups else "")
-            + (", with main keywords marked" if keywords_marked else "")
-            + (", and wrote the title(s)" if resume_title else ""),
+            + (", finalized the titles" if resume_title else "")
+            + (", with main keywords marked" if keywords_marked else ""),
             level="result",
         )
         return (
@@ -1403,10 +1852,12 @@ async def extract_experience(
     if backend["mode"] != "semantic":
         progress.emit("start", backend["detail"] or "Semantic search unavailable", level="warn")
 
-    # One chat for the whole job: skills, both sets of bullets and the summary
-    # are four turns in the same conversation, so each prompt still has the
-    # earlier ones in context. `chat` is None when DeepSeek is unreachable, and
-    # every step falls back on its own rather than failing the extraction.
+    # One chat for the whole job -- skills, both companies' bullets and
+    # summaries, the overall summary, the titles, the skill set, and the
+    # final whole-resume assembly (steps 1-7 below) all happen as turns in
+    # the same conversation, so each prompt still has the earlier ones in
+    # context. `chat` is None when DeepSeek is unreachable, and every step
+    # falls back on its own rather than failing the extraction.
     async with _chat_session() as chat:
         # Step 1: derive skills and mission from the job description when the
         # caller hasn't supplied them. This used to be a separate button in the
@@ -1441,14 +1892,19 @@ async def extract_experience(
             _select_job2, db, first_company, query
         )
 
+        # Step 2: both companies' challenges, introduced together before
+        # either one's bullets are asked for -- see _announce_companies.
+        await _announce_companies(chat, job1_sel, job1_picked, job2_sel, job2_picked)
+
+        # Step 3: each company's own bullets and section summary.
         job1_sel.bullets, gen1 = await _generate_bullets(
-            chat, job1_picked, job1_sel, job_description, JOB1_BULLET_COUNT
+            chat, job1_picked, job1_sel, job_description, JOB1_BULLET_COUNT, "job1"
         )
         job1_sel.company_summary, _ = await _generate_company_summary(
             chat, job1_sel, job_description, job_title
         )
         job2_sel.bullets, gen2 = await _generate_bullets(
-            chat, job2_picked, job2_sel, job_description, JOB2_BULLET_COUNT
+            chat, job2_picked, job2_sel, job_description, JOB2_BULLET_COUNT, "job2"
         )
         job2_sel.company_summary, _ = await _generate_company_summary(
             chat, job2_sel, job_description, job_title
@@ -1459,20 +1915,44 @@ async def extract_experience(
             chat, job1_sel, job2_sel, job_description, job_title
         )
 
-        # Step 5: the skill set, written last in this chat, before handoff to
-        # ChatGPT for revision and titling (step 6 below, once the chat has
-        # closed).
+        # Step 5: a first draft of the headlines -- resume-wide and each
+        # company's own, together in one turn (see _draft_titles) -- once
+        # the summary is settled. Not parsed here; folded into what step 8
+        # sends ChatGPT below, which is what actually finalizes them.
+        titles_draft = await _draft_titles(
+            chat, job1_sel, job2_sel, summary, current_title, job_description, job_title
+        )
+
+        # Step 6: the skill set, written in this chat, before it's all
+        # assembled for handoff to ChatGPT.
         skill_set, skill_set_source = await _generate_skill_set(
             chat, job1_sel, job2_sel, job_description, job_title
         )
 
+        # Step 7: DeepSeek assembles everything above into the complete
+        # resume, still in this chat, before handoff to ChatGPT.
+        whole_resume, whole_resume_source = await _generate_whole_resume(
+            chat, job1_sel, job2_sel, summary, skill_set
+        )
+
         turns = chat.turns if chat else 0
 
-    # Step 6, run only now that DeepSeek's chat has fully closed and released
+    # Falls back to the same content built programmatically when step 7
+    # didn't produce something usable -- see _generate_whole_resume. The
+    # title draft rides along as its own section regardless of which path
+    # produced the rest -- see _draft_titles for why it's sent unparsed.
+    resume_content = whole_resume or _assemble_resume_content(
+        job1_sel.bullets, job2_sel.bullets, job1_sel.company_summary,
+        job2_sel.company_summary, summary, skill_set,
+    )
+    if titles_draft:
+        resume_content += (
+            "\n\nDraft Titles (finalize these -- overall resume title "
+            f"first, then each company's own):\n{titles_draft}"
+        )
+
+    # Step 8, run only now that DeepSeek's chat has fully closed and released
     # the shared browser profile — see the docstring on _revise_with_chatgpt.
-    # Titles (resume-wide and per-company) are generated here too, as this
-    # chat's last turn, so they reflect the FINAL revised-and-marked text
-    # rather than a pre-revision draft.
     (
         job1_sel.bullets,
         job2_sel.bullets,
@@ -1485,6 +1965,7 @@ async def extract_experience(
         job2_sel.title,
         revised,
     ) = await _revise_with_chatgpt(
+        resume_content,
         job1_sel.bullets,
         job2_sel.bullets,
         job1_sel.company_summary,
@@ -1492,12 +1973,7 @@ async def extract_experience(
         summary,
         skill_set,
         job1_sel.company,
-        job1_sel.product,
         job2_sel.company,
-        job2_sel.product,
-        current_title,
-        job_description,
-        job_title,
     )
     title_source = "chatgpt" if generated_title else "none"
 
@@ -1506,7 +1982,8 @@ async def extract_experience(
         f"Finished: {len(job1_sel.bullets)} + {len(job2_sel.bullets)} bullets "
         f"({job1_sel.company} → {job2_sel.company})"
         + (f", summary, {turns} DeepSeek turns in 1 session" if turns else "")
-        + (", revised and titled by ChatGPT" if revised else ""),
+        + (", assembled by DeepSeek" if whole_resume else "")
+        + (", revised by ChatGPT" if revised else ""),
         level="result",
         job1={"company": job1_sel.company, "product": job1_sel.product,
               "bullets": len(job1_sel.bullets)},
@@ -1542,7 +2019,7 @@ async def extract_experience(
         # 'fallback' on either half means the AI provider wasn't used, which the
         # UI surfaces rather than passing template text off as generated.
         # 'chatgpt' overrides both: it means the text actually on the resume
-        # was revised by ChatGPT in step 7, regardless of which tier produced
+        # was revised by ChatGPT in step 8, regardless of which tier produced
         # the bullets it revised.
         "generator": (
             "chatgpt" if revised else ("deepseek" if gen1 == gen2 == "deepseek" else "fallback")

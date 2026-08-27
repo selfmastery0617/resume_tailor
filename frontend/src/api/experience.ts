@@ -17,9 +17,9 @@ export interface ExperienceResult {
   /** Resume summary written from the bullets above; "" when unavailable. */
   summary: string;
   summarySource: "deepseek" | "none";
-  /** Resume headline written for this job; "" when unavailable. */
+  /** Resume headline finalized by ChatGPT from a DeepSeek draft; "" when unavailable. */
   title: string;
-  titleSource: "deepseek" | "none";
+  titleSource: "chatgpt" | "none";
   /** Resume skill set written for this job, last in the DeepSeek chat;
    *  [] when unavailable (the profile's own skills are used instead). */
   skillSet: string[];

@@ -8,17 +8,21 @@ export interface AppSettings {
   tailoringPrompt: string;
   /** Writes the resume summary from the bullets, in the same DeepSeek chat. */
   summaryPrompt: string;
-  /** Writes the resume headline, once the summary exists. */
+  /** Writes the resume headline and each company's own title together, in
+   *  one turn, once the summary exists. */
   titlePrompt: string;
   /** Writes one summary per role (Job 1, Job 2), right after that role's own
    *  bullets, in the same DeepSeek chat. */
   companySummaryPrompt: string;
-  /** Writes the resume's skill set, last in the DeepSeek chat, before
-   *  handoff to ChatGPT. Positioned on the resume wherever the template's
+  /** Writes the resume's skill set in the DeepSeek chat, before the whole
+   *  resume is assembled. Positioned on the resume wherever the template's
    *  own "skills" block is placed (right after Summary by default). */
   skillSetPrompt: string;
-  /** Runs last, in a fresh ChatGPT chat: revises the bullets, company
-   *  summaries, and overall summary DeepSeek just wrote. */
+  /** Runs last in the DeepSeek chat: assembles the complete resume from
+   *  everything already written, before handoff to ChatGPT. */
+  wholeResumePrompt: string;
+  /** Runs last, in a fresh ChatGPT chat: revises the resume DeepSeek just
+   *  assembled. */
   revisionPrompt: string;
   /** A second message in that SAME ChatGPT chat, marking main keywords by
    *  wrapping them in [square brackets] -- the PDF renders those bold. */
