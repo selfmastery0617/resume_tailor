@@ -6,6 +6,7 @@ export const TAILORING_PLACEHOLDERS = [
   "count",
   "company",
   "product",
+  "role_order",
   "job_description",
   "achievements",
 ] as const;
@@ -65,6 +66,7 @@ export type PromptKey =
   | "summaryPrompt"
   | "titlePrompt"
   | "skillSetPrompt"
+  | "wholeResumePrompt"
   | "revisionPrompt"
   | "keywordsPrompt"
   | "corpusPrompt";
@@ -137,9 +139,10 @@ export const PROMPT_DEFS: PromptDef[] = [
     label: "5. Title generation prompt",
     description: (
       <>
-        Runs last, once the summary exists, and writes the professional title
-        at the top of the generated resume. Leave it blank on a job and the
-        profile's own title is used. Placeholders:{" "}
+        Runs once, in one turn, once the summary exists — writes the
+        professional title at the top of the generated resume AND each
+        company's own title below its name, together. Leave it blank on a
+        job and the profile's own title is used. Placeholders:{" "}
         <PlaceholderList tokens={TITLE_PLACEHOLDERS} />.
       </>
     ),
@@ -151,8 +154,8 @@ export const PROMPT_DEFS: PromptDef[] = [
     label: "6. Skill set prompt",
     description: (
       <>
-        Runs last in the DeepSeek chat, once the bullets, summary, and title
-        all exist, and writes the resume's skill set as a list. Positioned on
+        Runs in the DeepSeek chat, once the bullets, summary, and titles all
+        exist, and writes the resume's skill set as a list. Positioned on
         the resume wherever the template's own "skills" block is placed —
         right after Summary by default. Placeholders:{" "}
         <PlaceholderList tokens={SKILL_SET_PLACEHOLDERS} />.
@@ -162,13 +165,28 @@ export const PROMPT_DEFS: PromptDef[] = [
     rows: 10,
   },
   {
-    key: "revisionPrompt",
-    label: "7. Final revision prompt",
+    key: "wholeResumePrompt",
+    label: "7. Generate whole resume prompt",
     description: (
       <>
-        Runs last, in a new ChatGPT chat — the bullets, company summaries, and
-        overall summary just written are handed over first, then this prompt
-        asks ChatGPT to revise them. Requires ChatGPT to be connected on the{" "}
+        Runs last in the DeepSeek chat — asks it to assemble everything
+        written so far (both companies' bullets and summaries, the overall
+        summary, the skill set) into the complete resume, using what it
+        already has in context rather than that being pasted back in. No
+        placeholders — pure style instruction, same as the revision and
+        keyword prompts below.
+      </>
+    ),
+    rows: 10,
+  },
+  {
+    key: "revisionPrompt",
+    label: "8. Final revision prompt",
+    description: (
+      <>
+        Runs last, in a new ChatGPT chat — the resume DeepSeek just
+        assembled is handed over first, then this prompt asks ChatGPT to
+        revise it. Requires ChatGPT to be connected on the{" "}
         <strong>Settings</strong> tab; if it isn't, this step is skipped and
         DeepSeek's own text is used instead. No placeholders — it applies
         style rules to the resume ChatGPT was just given, not to individual
@@ -179,7 +197,7 @@ export const PROMPT_DEFS: PromptDef[] = [
   },
   {
     key: "keywordsPrompt",
-    label: "8. Keyword marking prompt",
+    label: "9. Keyword marking prompt",
     description: (
       <>
         A second message in that SAME ChatGPT chat, right after the revision

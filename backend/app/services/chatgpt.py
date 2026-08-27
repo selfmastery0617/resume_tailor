@@ -8,11 +8,10 @@ the cookie plus the composer being present rather than from localStorage.
 prompt, one fresh chat, one browser launch per call.
 
 `ask_chained_turns()` is the one exception: the resume-revision pipeline
-follows its revision message with more, in-the-same-chat messages asking
-ChatGPT to mark the resume's main keywords and then write its title and each
-company's own title — each needs everything said so far still in context, so
-none of them can be a separate, independent ask() call (which would open a
-brand-new chat with no memory of what came before). See
+follows its revision message with a second, in-the-same-chat message asking
+ChatGPT to mark the resume's main keywords — that needs everything said so
+far still in context, so it can't be a separate, independent ask() call
+(which would open a brand-new chat with no memory of what came before). See
 experience_service._revise_with_chatgpt().
 """
 
@@ -319,11 +318,10 @@ async def ask_chained_turns(
     everything said so far.
 
     Backs the resume pipeline's revision step: revise the bullets/summaries,
-    then -- in the same chat, so each later turn still has everything said
-    so far in context rather than needing it pasted again -- mark the
-    resume's main keywords, then write the resume's title and each
-    company's own title. Each entry in `build_next_message_fns` receives the
-    list of replies received so far (index 0 is the first turn's reply) and
+    then -- in the same chat, so the later turn still has everything said so
+    far in context rather than needing it pasted again -- mark the resume's
+    main keywords. Each entry in `build_next_message_fns` receives the list
+    of replies received so far (index 0 is the first turn's reply) and
     returns the next message to send, or None to stop the chain there.
     Returns every reply actually received, in order -- always at least one
     (the first turn's), and short of `len(build_next_message_fns) + 1` if a

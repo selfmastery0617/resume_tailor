@@ -246,8 +246,29 @@ class DeepSeekService:
 
     @staticmethod
     def _reply_text(page: Any) -> str:
-        """Text of the newest assistant message, or '' if there isn't one yet."""
-        bubbles = page.locator(ASSISTANT_MESSAGE_SELECTOR)
-        if bubbles.count() == 0:
-            return ""
-        return bubbles.last.inner_text().strip()
+        """Text of the newest assistant message, or '' if there isn't one yet.
+
+        ASSISTANT_MESSAGE_SELECTOR is a substring match ([class*='ds-markdown']),
+        which can match both the outer container for one reply AND a wrapper
+        around each block/paragraph inside it -- a multi-paragraph reply (a
+        list of bullets, say) then has several matches per turn, not one.
+        Naively taking `.last` on the unfiltered set grabs the LAST INNER
+        BLOCK rather than the whole message, silently truncating the reply to
+        just its final paragraph (observed directly: a 6-bullet reply read
+        back as only its last bullet). Keeping only elements with no matching
+        ancestor selects just the outermost message containers, so `.last`
+        among THOSE really is the newest message in full, regardless of how
+        many blocks it's broken into inside.
+        """
+        text = page.evaluate(
+            """(selector) => {
+                const all = Array.from(document.querySelectorAll(selector));
+                const topLevel = all.filter(
+                    (el) => !all.some((other) => other !== el && other.contains(el))
+                );
+                const last = topLevel[topLevel.length - 1];
+                return last ? last.innerText : "";
+            }""",
+            ASSISTANT_MESSAGE_SELECTOR,
+        )
+        return (text or "").strip()

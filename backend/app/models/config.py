@@ -75,7 +75,7 @@ prompts = Table(
     *timestamps(),
     CheckConstraint("scope IN ('org', 'user', 'profile')", name="scope_known"),
     CheckConstraint(
-        "kind IN ('skills', 'tailoring', 'summary', 'title', 'corpus', 'revision', 'companysummary', 'keywords', 'skillset')",
+        "kind IN ('skills', 'tailoring', 'summary', 'title', 'corpus', 'revision', 'companysummary', 'keywords', 'skillset', 'wholeresume')",
         name="kind_known",
     ),
     CheckConstraint(
