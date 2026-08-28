@@ -50,6 +50,7 @@ SEED = [
     {
         "company": "Google",
         "product": "Google Spanner (globally distributed database)",
+        "industry": "Cloud Infrastructure",
         "timeline": "2021 - 2024",
         "summary": "Globally distributed, strongly consistent database.",
         "projects": [
@@ -59,11 +60,11 @@ SEED = [
                 "challenges": [
                     {
                         "id": "google_spanner_replication_challenge1",
+                        "industry": "Cloud Infrastructure",
                         "challenge": "Replication lag spiked past 400ms during regional failover.",
                         "action": "Rewrote the leader election path and batched Paxos writes.",
                         "achievement": "Cut p99 failover lag to 90ms across 12 regions.",
                         "business_impact": "Met the 99.999% availability commitment for enterprise customers.",
-                        "skills_used": ["Distributed Systems", "Go", "Paxos"],
                         "seniority_indicator": "Led three engineers and presented the design to the storage director.",
                     }
                 ],

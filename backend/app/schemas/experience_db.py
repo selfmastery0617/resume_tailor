@@ -6,6 +6,7 @@ Canonical shape is a flat array of company+product entries:
       {
         "company":  "Company Name",
         "product":  "Specific Product Name",
+        "industry": "Industry name",
         "timeline": "YYYY - YYYY",
         "summary":  "One-sentence overview.",
         "projects": [ { "name", "description", "challenges": [ STAR... ] } ]
@@ -21,45 +22,29 @@ accepted on read and converted, so an existing file keeps working.
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-# Used for the "Job 2" selection. Matched case-insensitively against company
-# names, so "Google LLC" or "Meta Platforms" still resolve.
-FAANG_COMPANIES: tuple[str, ...] = (
-    "google",
-    "amazon",
-    "meta",
-    "facebook",
-    "netflix",
-    "apple",
-    "microsoft",
-)
-
-
-def is_faang(company_name: str) -> bool:
-    name = (company_name or "").strip().lower()
-    return any(brand in name for brand in FAANG_COMPANIES)
-
 
 class Challenge(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    industry: str = ""
     challenge: str = ""
     action: str = ""
     achievement: str = ""
     business_impact: str = ""
-    skills_used: list[str] = Field(default_factory=list)
     seniority_indicator: str = ""
 
     def search_text(self) -> str:
-        """One string for the embedder: every field that carries signal."""
+        """One string for the embedder: every field that carries signal,
+        except id."""
         return " ".join(
             part
             for part in (
+                self.industry,
                 self.challenge,
                 self.action,
                 self.achievement,
                 self.business_impact,
-                " ".join(self.skills_used),
                 self.seniority_indicator,
             )
             if part
@@ -81,6 +66,7 @@ class ProductEntry(BaseModel):
 
     company: str
     product: str
+    industry: str = ""
     timeline: str = ""
     summary: str = ""
     projects: list[Project] = Field(default_factory=list)
@@ -112,13 +98,12 @@ class ExperienceDatabase(BaseModel):
         matches = self.entries_for_company(name)
         return matches[0].company.strip() if matches else None
 
-    def faang_entries(self, exclude: str | None = None) -> list[ProductEntry]:
+    def entries_excluding(self, exclude: str | None = None) -> list[ProductEntry]:
+        """Every entry except the given company -- used for Job 2, which
+        draws from the rest of the corpus rather than a fixed brand list.
+        """
         excluded = (exclude or "").strip().lower()
-        return [
-            e
-            for e in self.entries
-            if is_faang(e.company) and e.company.strip().lower() != excluded
-        ]
+        return [e for e in self.entries if e.company.strip().lower() != excluded]
 
 
 class ExperienceDatabaseError(ValueError):

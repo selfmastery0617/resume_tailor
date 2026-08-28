@@ -530,6 +530,13 @@
   color: var(--text-h, #08060d);
 }
 
+.weight-slider {
+  display: block;
+  margin-bottom: 0.3rem;
+}
+
+.weight-slider input { width: 100%; margin-top: 0.35rem; }
+
 .prompt-textarea {
   width: 100%;
   box-sizing: border-box;

@@ -63,6 +63,27 @@ function EventData({ data }: { data: Record<string, unknown> }) {
     );
   }
 
+  const documents = data.documents as
+    | { id: string; company: string; product: string; project: string; text: string }[]
+    | undefined;
+  if (documents?.length) {
+    rows.push(
+      <table key="documents" className="console-table">
+        <tbody>
+          {documents.map((d) => (
+            <tr key={d.id}>
+              <td>
+                <span className="console-dim">{d.company} · {d.product} · {d.project}</span>
+                <br />
+                {d.text}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>,
+    );
+  }
+
   const tally = data.tally as { product: string; score: number }[] | undefined;
   if (tally?.length) {
     const max = Math.max(...tally.map((t) => t.score));

@@ -181,8 +181,13 @@ def score_documents(query: str, documents: Sequence[str]) -> list[float]:
         return _lexical_scores(query, documents)
 
 
-def build_query(tech_skills: Sequence[str], job_mission: str, job_title: str = "") -> str:
-    """The hybrid query: role + required tech + business context."""
-    return " ".join(
-        part for part in (job_title, ", ".join(tech_skills), job_mission) if part
-    ).strip()
+def build_query(fields: dict[str, str], job_title: str = "") -> str:
+    """The hybrid query: role, plus every field the skills-extraction step
+    returned -- skills, mission, industry, and whatever else a future
+    prompt edit adds -- each labeled by its own name so the embedder sees
+    "skills: ... - mission: ... - industry: ...". A new field needs no
+    change here: it just needs to come back as a tag in that step's XML
+    reply (see _parse_extraction_reply in experience_service.py).
+    """
+    labeled = " - ".join(f"{name}: {value}" for name, value in fields.items() if value)
+    return " ".join(part for part in (job_title, labeled) if part).strip()

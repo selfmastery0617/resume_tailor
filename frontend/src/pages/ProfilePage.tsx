@@ -227,13 +227,14 @@ export function ProfilePage({ active = true, onProfileChanged }: ProfilePageProp
     setPromptSaving(true);
     setPromptError(null);
     try {
-      const patch = Object.fromEntries(
-        PROMPT_KEYS_LIST.map((key) => [key, promptDraft[key]]),
-      ) as Partial<AppSettings>;
+      const patch = {
+        ...Object.fromEntries(PROMPT_KEYS_LIST.map((key) => [key, promptDraft[key]])),
+        industryWeight: promptDraft.industryWeight,
+      } as Partial<AppSettings>;
       const updated = await patchSettings(patch);
       setPromptDraft(updated);
       setPromptSaved(updated);
-      setPromptNotice("Prompts saved.");
+      setPromptNotice("Saved.");
     } catch {
       setPromptError("Could not save prompts.");
     } finally {
@@ -496,7 +497,7 @@ export function ProfilePage({ active = true, onProfileChanged }: ProfilePageProp
           </section>
 
           <section className="settings-section">
-            <h2>Prompts</h2>
+            <h2>Prompts &amp; search tuning</h2>
             <p className="notice">
               This profile's own prompts — customizing one here only affects
               resumes tailored under <strong>{profiles.find((p) => p.id === activeId)?.name}</strong>,
@@ -516,6 +517,25 @@ export function ProfilePage({ active = true, onProfileChanged }: ProfilePageProp
 
             {promptDraft && (
               <div className="prompt-section">
+                <label className="weight-slider" htmlFor="profile-industry-weight">
+                  Industry weight in search: {Math.round(Number(promptDraft.industryWeight) * 100)}%
+                  <input
+                    id="profile-industry-weight"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={promptDraft.industryWeight}
+                    onChange={(event) => updatePrompt("industryWeight", event.target.value)}
+                  />
+                </label>
+                <p className="notice">
+                  How much a challenge's industry similarity to this job
+                  counts toward which experience gets picked for Job 1 and
+                  Job 2 — 0% ignores industry entirely; 100% lets it dominate
+                  over the actual skills/challenge-text match.
+                </p>
+
                 <label htmlFor="profile-prompt-select">Prompt to edit</label>
                 <select
                   id="profile-prompt-select"
@@ -560,7 +580,7 @@ export function ProfilePage({ active = true, onProfileChanged }: ProfilePageProp
                     onClick={() => void handleSavePrompts()}
                     disabled={!promptDirty || promptSaving}
                   >
-                    {promptSaving ? "Saving…" : "Save prompts"}
+                    {promptSaving ? "Saving…" : "Save"}
                   </button>
                 </div>
               </div>

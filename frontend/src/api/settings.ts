@@ -38,6 +38,11 @@ export interface AppSettings {
    *  end->present, so these two numbers date every tailored resume. */
   firstCompanyStartYear: string;
   firstCompanyEndYear: string;
+  /** How much a challenge's industry-similarity score counts toward its
+   *  ranking score during Job 1/Job 2 selection -- a number from 0 to 1,
+   *  as a string (settings are stored as text). Profile-scoped, like
+   *  firstCompany. */
+  industryWeight: string;
   /** Profile used for tailored resume PDFs; its name becomes the file name.
    *  Empty means "use the first profile". */
   resumeProfile: string;

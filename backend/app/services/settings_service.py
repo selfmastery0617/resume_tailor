@@ -23,10 +23,14 @@ from app.models import prompts, settings
 DEFAULT_SKILLS_PROMPT = """Extract the following from this job description:
 1. Main Skills - the key technical and professional skills required, as a concise comma-separated list.
 2. Job Mission - the core purpose of this role, in one sentence.
+3. Industry - the industry this role belongs to, in a few words.
 
-Respond in exactly this format:
-Skills: <comma-separated list>
-Mission: <one sentence>"""
+Respond in exactly this XML format and nothing else:
+<extraction>
+  <skills>comma-separated list</skills>
+  <mission>one sentence</mission>
+  <industry>industry name</industry>
+</extraction>"""
 
 # Used to turn selected challenges into resume bullets. Placeholders in braces
 # are substituted before the prompt is sent; unknown ones are left untouched.
@@ -256,10 +260,10 @@ Rules:
 - Use only what my experience states. Do not invent employers, products, dates,
   metrics, or technologies. If something is not stated, leave it out.
 - Give every challenge a unique id: lowercase, company_product_project_challengeN.
+- industry is the product's industry (e.g. Fintech, Healthcare, Education) --
+  the same value at the product level and on every challenge under it.
 - challenge, action, achievement and business_impact are one sentence each.
 - seniority_indicator describes scope: who was led, who it was presented to.
-- skills_used lists the technologies and disciplines each challenge names.
-  Never leave it empty when any are mentioned.
 - Split each role into two projects where my experience describes two distinct
   pieces of work, and give each project two challenges where there is enough
   detail for two. Where there is not, write fewer — one real challenge beats two
@@ -270,6 +274,7 @@ Schema:
   {
     "company": "Acme",
     "product": "Acme Payments",
+    "industry": "Fintech",
     "timeline": "2019 - 2022",
     "summary": "One sentence on what the product does and my part in it.",
     "projects": [
@@ -279,11 +284,11 @@ Schema:
         "challenges": [
           {
             "id": "acme_payments_settlement_challenge1",
+            "industry": "Fintech",
             "challenge": "The problem, in one sentence.",
             "action": "What I did about it, in one sentence.",
             "achievement": "The measurable result, in one sentence.",
             "business_impact": "Why it mattered to the business.",
-            "skills_used": ["Python", "PostgreSQL"],
             "seniority_indicator": "Who I led and who I presented to."
           }
         ]
@@ -337,6 +342,13 @@ DEFAULTS: dict[str, Any] = {
     # resume. Profile-scoped for the same reason firstCompany is.
     "firstCompanyStartYear": "",
     "firstCompanyEndYear": "",
+    # How much a challenge's industry-similarity score counts toward its
+    # final ranking score during Job 1/Job 2 selection -- see
+    # INDUSTRY_SIMILARITY_WEIGHT in experience_service.py, which falls back
+    # to this same default when nothing is stored. 0-1; profile-scoped like
+    # firstCompany, since what counts as "this profile's industry fit" is
+    # meaningless outside the corpus it's tuning search over.
+    "industryWeight": "0.35",
     # Profile whose details and template are used for tailored resume PDFs, and
     # whose name becomes "<Profile>_resume.pdf". Empty = use the first profile.
     "resumeProfile": "",
@@ -369,7 +381,7 @@ def _validate_year(key: str, value: Any) -> str:
 
 # Settings that belong to one resume identity rather than the whole account.
 PROFILE_SCOPED: frozenset[str] = frozenset(
-    {"firstCompany", "firstCompanyStartYear", "firstCompanyEndYear"}
+    {"firstCompany", "firstCompanyStartYear", "firstCompanyEndYear", "industryWeight"}
 )
 
 PROMPT_KEYS: dict[str, str] = {
@@ -488,6 +500,14 @@ def validate_settings(patch: dict[str, Any]) -> dict[str, Any]:
                 value = str(value).strip()
         elif key in ("firstCompanyStartYear", "firstCompanyEndYear"):
             value = _validate_year(key, value)
+        elif key == "industryWeight":
+            try:
+                weight = float(value)
+            except (TypeError, ValueError):
+                raise ValueError("industryWeight must be a number.")
+            if not 0.0 <= weight <= 1.0:
+                raise ValueError("industryWeight must be between 0 and 1.")
+            value = str(weight)
         elif key == "resumeProfile":
             if value:
                 # A deleted profile would otherwise fail at generation time with

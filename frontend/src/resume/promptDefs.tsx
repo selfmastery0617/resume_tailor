@@ -87,11 +87,14 @@ export const PROMPT_DEFS: PromptDef[] = [
     label: "1. Skill extraction prompt",
     description: (
       <>
-        Pulls the required skills and the job mission out of the description.
-        Results appear in the console.
+        Pulls the required skills, the job mission, and the industry out of
+        the description as XML. Every tag inside &lt;extraction&gt; becomes
+        a labeled part of the search query (skills: ... - mission: ... -
+        industry: ...) with no code change needed — add a tag here and it
+        just works. Results appear in the console.
       </>
     ),
-    rows: 6,
+    rows: 8,
   },
   {
     key: "tailoringPrompt",

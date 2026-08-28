@@ -5,10 +5,11 @@ Job 1 (earlier role)  — the company chosen in Settings.
     best-matching product, pick top challenges from *different* projects,
     and generate exactly 6 bullets.
 
-Job 2 (recent role)   — chosen automatically from FAANG companies.
-    Rank challenges across all FAANG companies (excluding Job 1's company),
-    take the single highest-scoring product globally, pick exactly 2 projects
-    by their challenge scores, and generate exactly 8 bullets (4 per project).
+Job 2 (recent role)   — chosen automatically from the rest of the corpus.
+    Rank challenges across every other company in database.json (excluding
+    Job 1's company), take the single highest-scoring product globally, pick
+    exactly 2 projects by their challenge scores, and generate exactly 8
+    bullets (4 per project).
 
 Bullet generation goes through the configured AI provider; if that is
 unavailable the challenges are rendered deterministically instead, so the
@@ -38,6 +39,16 @@ JOB1_BULLET_COUNT = 6
 JOB2_BULLET_COUNT = 8
 JOB2_PROJECT_COUNT = 2
 SUMMARY_SENTENCES = 3
+
+# How much a challenge's own industry-similarity score counts toward its
+# final ranking score -- see _rank(). The job's industry and each
+# challenge's industry are embedded and compared independently of the main
+# query/document text (a focused comparison, not diluted by everything else
+# in both blobs), then blended in: final = (1-w)*overall + w*industry. 0.35
+# is a deliberate, sizable weight -- industry can meaningfully swing which
+# challenge wins -- without letting it alone decide: the other 65% still
+# comes from the actual skills/mission/challenge-text match.
+INDUSTRY_SIMILARITY_WEIGHT = 0.35
 
 # Filled into the tailoring prompt's {role_order} placeholder (see
 # DEFAULT_TAILORING_PROMPT in settings_service.py) so the model can tell
@@ -101,14 +112,57 @@ def _flatten(entries: Sequence[ProductEntry]) -> list[tuple[Challenge, Project, 
     return rows
 
 
-def _rank(query: str, rows: Sequence[tuple], label: str = "") -> list[ScoredChallenge]:
+def _rank(
+    query: str,
+    rows: Sequence[tuple],
+    label: str = "",
+    industry: str = "",
+    industry_weight: float = INDUSTRY_SIMILARITY_WEIGHT,
+) -> list[ScoredChallenge]:
     if not rows:
         return []
     import time as _time
 
+    documents = [r[0].search_text() for r in rows]
+    progress.emit(
+        label or "rank",
+        f"Combined search text for {len(documents)} challenges",
+        level="info",
+        documents=[
+            {
+                "id": challenge.id,
+                "company": entry.company,
+                "product": entry.product,
+                "project": project.name,
+                "text": text,
+            }
+            for (challenge, project, entry), text in zip(rows, documents)
+        ],
+    )
+
     started = _time.monotonic()
-    scores = vector_search.score_documents(query, [r[0].search_text() for r in rows])
+    scores = vector_search.score_documents(query, documents)
     elapsed = _time.monotonic() - started
+
+    # A second, focused comparison: the job's industry embedded and scored
+    # against each challenge's own industry field alone, independent of
+    # everything else in the query/document text -- then blended into the
+    # overall score (see INDUSTRY_SIMILARITY_WEIGHT). Only challenges that
+    # actually have an industry set take part; the rest keep their plain
+    # semantic score unchanged rather than being compared against "".
+    industry_key = industry.strip()
+    blended = 0
+    if industry_key:
+        industry_idx = [i for i, r in enumerate(rows) if r[0].industry.strip()]
+        if industry_idx:
+            industry_scores = vector_search.score_documents(
+                industry_key, [rows[i][0].industry for i in industry_idx]
+            )
+            for i, industry_score in zip(industry_idx, industry_scores):
+                scores[i] = (
+                    (1 - industry_weight) * scores[i] + industry_weight * industry_score
+                )
+                blended += 1
 
     scored = [
         ScoredChallenge(challenge=r[0], project=r[1], entry=r[2], score=s)
@@ -119,7 +173,8 @@ def _rank(query: str, rows: Sequence[tuple], label: str = "") -> list[ScoredChal
     backend = vector_search.backend()
     progress.emit(
         label or "rank",
-        f"Scored {len(rows)} challenges in {elapsed:.2f}s ({backend['mode']})",
+        f"Scored {len(rows)} challenges in {elapsed:.2f}s ({backend['mode']})"
+        + (f" — blended industry similarity into {blended} challenges' scores" if industry_key else ""),
         level="step",
         matches=[
             {
@@ -178,7 +233,13 @@ def _best_product(
     return by_product[best_key][0].entry
 
 
-def _select_job1(db: ExperienceDatabase, company_name: str, query: str) -> tuple[JobSelection, list[ScoredChallenge]]:
+def _select_job1(
+    db: ExperienceDatabase,
+    company_name: str,
+    query: str,
+    industry: str = "",
+    industry_weight: float = INDUSTRY_SIMILARITY_WEIGHT,
+) -> tuple[JobSelection, list[ScoredChallenge]]:
     canonical = db.find_company(company_name)
     if canonical is None:
         raise ExperienceExtractionError(
@@ -194,7 +255,10 @@ def _select_job1(db: ExperienceDatabase, company_name: str, query: str) -> tuple
     )
 
     # All products belonging to this company.
-    scored = _rank(query, _flatten(company_entries), label="job1")
+    scored = _rank(
+        query, _flatten(company_entries), label="job1", industry=industry,
+        industry_weight=industry_weight,
+    )
     if not scored:
         raise ExperienceExtractionError(
             f"{canonical} has no challenges in database.json to extract from."
@@ -239,24 +303,33 @@ def _select_job1(db: ExperienceDatabase, company_name: str, query: str) -> tuple
     return selection, picked
 
 
-def _select_job2(db: ExperienceDatabase, exclude_company: str, query: str) -> tuple[JobSelection, list[ScoredChallenge]]:
-    faang = db.faang_entries(exclude=exclude_company)
-    if not faang:
+def _select_job2(
+    db: ExperienceDatabase,
+    exclude_company: str,
+    query: str,
+    industry: str = "",
+    industry_weight: float = INDUSTRY_SIMILARITY_WEIGHT,
+) -> tuple[JobSelection, list[ScoredChallenge]]:
+    candidates = db.entries_excluding(exclude_company)
+    if not candidates:
         raise ExperienceExtractionError(
-            "No FAANG company found in database.json for the most recent role. "
-            "Add one of Google, Amazon, Meta, Netflix, Apple or Microsoft."
+            "No other company found in database.json for the most recent role. "
+            "Add at least one company besides the first."
         )
 
     progress.emit(
         "job2",
-        f"FAANG candidates (excluding {exclude_company}): "
-        + ", ".join(f"{e.company}/{e.product}" for e in faang),
+        f"Candidates (excluding {exclude_company}): "
+        + ", ".join(f"{e.company}/{e.product}" for e in candidates),
         level="info",
     )
 
-    scored = _rank(query, _flatten(faang), label="job2")
+    scored = _rank(
+        query, _flatten(candidates), label="job2", industry=industry,
+        industry_weight=industry_weight,
+    )
     if not scored:
-        raise ExperienceExtractionError("The FAANG companies have no challenges to extract from.")
+        raise ExperienceExtractionError("The other companies have no challenges to extract from.")
 
     # Sum of scores per product near the top — an approximate view of the
     # signal _best_product actually decides on below (which sums each
@@ -276,7 +349,7 @@ def _select_job2(db: ExperienceDatabase, exclude_company: str, query: str) -> tu
     # Require a product that can supply the two projects the spec calls for.
     entry = _best_product(scored, min_projects=JOB2_PROJECT_COUNT)
     if entry is None:
-        raise ExperienceExtractionError("No FAANG product could be selected.")
+        raise ExperienceExtractionError("No product could be selected for the most recent role.")
 
     in_product = [
         s for s in scored if s.company == entry.company and s.product == entry.product
@@ -421,7 +494,6 @@ def _format_achievements(picked: Sequence[ScoredChallenge]) -> str:
         f"- Action: {p.challenge.action}\n"
         f"- Achievement: {p.challenge.achievement}\n"
         f"- Business impact: {p.challenge.business_impact}\n"
-        f"- Skills: {', '.join(p.challenge.skills_used)}\n"
         f"- Seniority: {p.challenge.seniority_indicator}"
         for i, p in enumerate(picked)
     )
@@ -629,32 +701,43 @@ async def _chat_session() -> AsyncIterator["DeepSeekConversation | None"]:
             await conversation.close()
 
 
-def _parse_skills_reply(reply: str) -> tuple[list[str], str]:
-    """Pull 'Skills: a, b' and 'Mission: ...' out of the model's reply."""
-    skills: list[str] = []
-    mission = ""
-    for line in (reply or "").splitlines():
-        stripped = line.strip().lstrip("-*• ").strip()
-        lowered = stripped.lower()
-        if lowered.startswith("skills:"):
-            skills = [
-                s.strip()
-                for s in stripped.split(":", 1)[1].replace(";", ",").split(",")
-                if s.strip()
-            ]
-        elif lowered.startswith("mission:"):
-            mission = stripped.split(":", 1)[1].strip()
-    return skills[:15], mission
+_EXTRACTION_XML_RE = re.compile(r"<extraction\b.*?</extraction\s*>", re.IGNORECASE | re.DOTALL)
 
 
-async def _extract_skills_and_mission(
+def _parse_extraction_reply(reply: str) -> dict[str, str]:
+    """Every field the skills-extraction prompt's <extraction> XML reply
+    actually contains, keyed by its own tag name -- skills, mission,
+    industry, and whatever else a future prompt edit adds reaches the
+    query (see build_query in vector_search.py) with no code change here,
+    since this just forwards whatever tags the model answered with rather
+    than looking for specific ones. _BARE_AMPERSAND_RE (defined further
+    below, alongside the resume XML parsing it was written for) pre-escapes
+    a bare '&' the same way here -- skill/industry names commonly contain
+    one (e.g. "Frameworks & Data Processing").
+    """
+    match = _EXTRACTION_XML_RE.search(reply or "")
+    if not match:
+        return {}
+    try:
+        root = ET.fromstring(_BARE_AMPERSAND_RE.sub("&amp;", match.group(0)))
+    except ET.ParseError:
+        return {}
+    return {
+        child.tag.strip().lower(): (child.text or "").strip()
+        for child in root
+        if child.tag and (child.text or "").strip()
+    }
+
+
+async def _extract_job_fields(
     chat: "DeepSeekConversation | None",
     job_description: str,
     existing_mission: str,
-) -> tuple[list[str], str]:
-    """Step 1 of the pipeline: skills + mission from the job description.
+) -> dict[str, str]:
+    """Step 1 of the pipeline: everything the skills-extraction prompt's XML
+    reply contains (skills, mission, industry, ...), keyed by tag name.
 
-    Falls back to an empty skill list on failure — the search query still works
+    Falls back to an empty dict on failure — the search query still works
     from the description text alone, just with less signal.
     """
     from app.services import settings_service
@@ -669,20 +752,23 @@ async def _extract_skills_and_mission(
     )
 
     if chat is None:
-        return [], existing_mission
+        return {"mission": existing_mission} if existing_mission else {}
 
     try:
         reply = await chat.ask(prompt)
-        skills, mission = _parse_skills_reply(reply)
+        fields = _parse_extraction_reply(reply)
+        skills = [s.strip() for s in fields.get("skills", "").split(",") if s.strip()]
         if skills:
             progress.emit(
                 "skills",
                 f"Found {len(skills)} skills",
                 level="result",
                 skills=skills,
-                preview=(mission or "")[:200],
+                preview=(fields.get("mission") or "")[:200],
             )
-            return skills, existing_mission or mission
+            if existing_mission:
+                fields["mission"] = existing_mission
+            return fields
         progress.emit(
             "skills",
             "No skills parsed from the reply — ranking on the description text alone",
@@ -695,7 +781,7 @@ async def _extract_skills_and_mission(
             "ranking on the description text alone",
             level="warn",
         )
-    return [], existing_mission
+    return {"mission": existing_mission} if existing_mission else {}
 
 
 def _clean_summary(reply: str) -> str:
@@ -1859,37 +1945,54 @@ async def extract_experience(
     # context. `chat` is None when DeepSeek is unreachable, and every step
     # falls back on its own rather than failing the extraction.
     async with _chat_session() as chat:
-        # Step 1: derive skills and mission from the job description when the
-        # caller hasn't supplied them. This used to be a separate button in the
-        # Jobs table; folding it in keeps the pipeline traceable in one place.
-        skills = list(tech_skills or [])
-        mission = job_mission or ""
-        if not skills and job_description.strip():
-            skills, mission = await _extract_skills_and_mission(
-                chat, job_description, mission
-            )
+        # Step 1: derive skills, mission, and industry from the job
+        # description when the caller hasn't supplied skills. This used to
+        # be a separate button in the Jobs table; folding it in keeps the
+        # pipeline traceable in one place.
+        if tech_skills:
+            fields: dict[str, str] = {"skills": ", ".join(tech_skills)}
+            if job_mission:
+                fields["mission"] = job_mission
+        elif job_description.strip():
+            fields = await _extract_job_fields(chat, job_description, job_mission or "")
+        else:
+            fields = {"mission": job_mission} if job_mission else {}
+        if not fields.get("mission"):
+            fields["mission"] = job_description[:600]
 
-        query = vector_search.build_query(
-            skills, mission or job_description[:600], job_title
-        )
+        skills = [s.strip() for s in fields.get("skills", "").split(",") if s.strip()]
+        industry = fields.get("industry", "")
+
+        from app.services import settings_service
+
+        try:
+            industry_weight = float(settings_service.get_settings().get("industryWeight") or "")
+        except (TypeError, ValueError):
+            industry_weight = INDUSTRY_SIMILARITY_WEIGHT
+
+        query = vector_search.build_query(fields, job_title)
         progress.emit(
             "query",
             "Built hybrid search query",
             level="step",
             skills=skills,
-            query=query[:300],
+            query=query,
         )
 
         # Off the event loop. Ranking calls sentence-transformers, which is
         # CPU-bound and loads a ~90MB model on first use — measured at 30s.
         # Run inline it froze the whole server for that long: every request,
         # including /health, waits behind it because nothing else can be
-        # served while the loop is executing Python.
+        # served while the loop is executing Python. `industry` blends an
+        # industry-specific similarity into each selection's ranking, by
+        # `industry_weight` -- the profile's own "Industry weight" slider on
+        # the Profile page (falls back to INDUSTRY_SIMILARITY_WEIGHT when
+        # nothing is stored yet).
         job1_sel, job1_picked = await asyncio.to_thread(
-            _select_job1, db, first_company, query
+            _select_job1, db, first_company, query, industry, industry_weight
         )
         job2_sel, job2_picked = await asyncio.to_thread(
-            _select_job2, db, first_company, query
+            _select_job2, db, first_company, query, industry, industry_weight
         )
 
         # Step 2: both companies' challenges, introduced together before
