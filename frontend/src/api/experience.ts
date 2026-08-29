@@ -17,24 +17,26 @@ export interface ExperienceResult {
   /** Resume summary written from the bullets above; "" when unavailable. */
   summary: string;
   summarySource: "deepseek" | "none";
-  /** Resume headline finalized by ChatGPT from a DeepSeek draft; "" when unavailable. */
+  /** Resume headline finalized by the revision pass from the earlier draft
+   *  in the same chat; "" when unavailable. */
   title: string;
   titleSource: "chatgpt" | "none";
-  /** Resume skill set written for this job, last in the DeepSeek chat;
+  /** Resume skill set written for this job, in the same ChatGPT chat;
    *  [] when unavailable (the profile's own skills are used instead). */
   skillSet: string[];
   skillSetSource: "deepseek" | "none";
-  /** ChatGPT's categorization of skillSet, from the same revision pass that
-   *  handles bullets/summaries; [] when it never ran or didn't parse, in
-   *  which case skillSet renders as one uncategorized group instead. */
+  /** The revision pass's categorization of skillSet, from the same message
+   *  that handles bullets/summaries; [] when it never ran or didn't parse,
+   *  in which case skillSet renders as one uncategorized group instead. */
   skillGroups: { category: string; skills: string[] }[];
-  /** Prompts that shared this job's single DeepSeek chat; 0 = never connected. */
+  /** Prompts that shared this job's one ChatGPT chat; 0 = never connected. */
   deepseekTurns: number;
   search: { mode: "semantic" | "lexical"; model: string | null; detail: string | null };
   /** "fallback" means the AI provider was unavailable and bullets were composed
    *  directly from database.json rather than generated. "chatgpt" means
-   *  DeepSeek generated the bullets and summary, and a final ChatGPT pass
-   *  then revised them — that revised text is what's actually on the resume. */
+   *  the chat generated the bullets and summary, and its own revision pass
+   *  later in that same chat then revised them — that revised text is
+   *  what's actually on the resume. */
   generator: "deepseek" | "chatgpt" | "fallback";
   extractedAt: string;
 }

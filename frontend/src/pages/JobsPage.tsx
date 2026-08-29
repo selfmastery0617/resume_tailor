@@ -37,7 +37,7 @@ import {
   type TailoredResume,
 } from "../api/resumes";
 import { extractExperience, fetchAllExperience, type ExperienceResult } from "../api/experience";
-import { fetchSettledSessionStatus } from "../api/deepseek";
+import { fetchSettledChatGptSession } from "../api/chatgpt";
 import type { Job } from "../types/job";
 import { UrlCellRenderer } from "../components/UrlCellRenderer";
 import { ResumeCellRenderer, type ResumeGridContext } from "../components/ResumeCellRenderer";
@@ -175,8 +175,9 @@ function quoteTsvField(value: string): string {
 }
 
 interface JobsPageProps {
-  /** Changes when the DeepSeek session may have, so the banner re-checks
-   *  instead of standing on the answer it got when the tab first mounted. */
+  /** Changes when a provider's session may have, so the ChatGPT-connection
+   *  banner re-checks instead of standing on the answer it got when the tab
+   *  first mounted. */
   sessionVersion: number;
   /** True while this tab is visible. Pages stay mounted to preserve unsaved
    *  edits, so they must refresh on activation or they show stale data --
@@ -196,7 +197,7 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(20);
-  const [deepSeekConnected, setDeepSeekConnected] = useState(true);
+  const [chatGptConnected, setChatGptConnected] = useState(true);
   const [deletingRows, setDeletingRows] = useState<Set<string>>(new Set());
   // Ticked checkboxes, kept here so the toolbar can act on them. AG Grid holds
   // the authoritative state; this mirrors it for rendering.
@@ -265,10 +266,10 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     let alive = true;
     void (async () => {
       try {
-        const status = await fetchSettledSessionStatus();
-        if (alive) setDeepSeekConnected(status.connected);
+        const status = await fetchSettledChatGptSession();
+        if (alive) setChatGptConnected(status.connected);
       } catch {
-        if (alive) setDeepSeekConnected(false);
+        if (alive) setChatGptConnected(false);
       }
     })();
     return () => {
@@ -935,9 +936,9 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
         </label>
       </div>
 
-      {!deepSeekConnected && (
+      {!chatGptConnected && (
         <p className="notice">
-          DeepSeek is not connected, so generating a resume will fall back to
+          ChatGPT is not connected, so generating a resume will fall back to
           composing bullets from your database.json. Connect it on the{" "}
           <strong>Settings</strong> tab.
         </p>

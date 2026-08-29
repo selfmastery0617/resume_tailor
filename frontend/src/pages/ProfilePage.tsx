@@ -248,7 +248,7 @@ export function ProfilePage({ active = true, onProfileChanged }: ProfilePageProp
   };
 
   // -- repeatable sections ------------------------------------------------
-  // Experience is no longer hand-entered here: extraction (DeepSeek) writes
+  // Experience is no longer hand-entered here: extraction (ChatGPT) writes
   // it per job, replacing whatever's here at PDF-generation time -- see
   // build_tailored_data() in tailored_resume_service.py.
 
@@ -501,15 +501,14 @@ export function ProfilePage({ active = true, onProfileChanged }: ProfilePageProp
             <p className="notice">
               This profile's own prompts — customizing one here only affects
               resumes tailored under <strong>{profiles.find((p) => p.id === activeId)?.name}</strong>,
-              not your other profiles. The first six run as turns in a{" "}
-              <strong>single DeepSeek chat</strong> for one job, ending with
-              the skill set once the bullets, summary, and title all exist.
-              The seventh and eighth run once more, as two messages in the
-              same fresh <strong>ChatGPT chat</strong>: first revising the
-              bullets, company summaries, and overall summary DeepSeek just
-              wrote, then marking the main keywords in that revised text. The
-              last is separate — it builds this profile's career database
-              rather than tailoring a resume.
+              not your other profiles. The first nine all run as turns in a{" "}
+              <strong>single ChatGPT chat</strong> for one job: assembling
+              the complete resume once the bullets, summary, title, and
+              skill set all exist, then revising the bullets, company
+              summaries, and overall summary it just wrote, then marking the
+              main keywords in that revised text. The last is separate — it
+              builds this profile's career database rather than tailoring a
+              resume.
             </p>
 
             {promptError && <p className="error">{promptError}</p>}

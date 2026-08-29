@@ -87,7 +87,7 @@ Target job description:
 Experience just written for this resume ({companies}):
 {bullets}"""
 
-# Runs last, after the summary, in the same DeepSeek chat (step 5 in
+# Runs last, after the summary, in the same ChatGPT chat (step 5 in
 # experience_service.py's extract_experience, see _draft_titles) -- ONE turn
 # that asks for the resume-wide title and each company's own title together,
 # rather than three separate asks sharing this one prompt. That used to be
@@ -132,8 +132,8 @@ TITLE_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
-# Runs last in the DeepSeek chat, after the title -- before handoff to
-# ChatGPT for revision (see _revise_with_chatgpt). Where it lands on the
+# Runs last in this chat, after the title -- before revision (steps 8-9,
+# see _revise_with_chatgpt), still in the same chat. Where it lands on the
 # rendered resume is up to the template's own "skills" block placement
 # (default_layout() in backend/app/schemas/layout.py puts it right after
 # Summary), not this prompt.
@@ -191,14 +191,14 @@ COMPANY_SUMMARY_PLACEHOLDERS: tuple[str, ...] = (
     "bullets",
 )
 
-# Step 7, still in the DeepSeek chat: everything above (titles, both
+# Step 7, still in the ChatGPT chat: everything above (titles, both
 # companies' bullets and summaries, the overall summary, the skill set) was
-# written across several turns -- this one asks DeepSeek to assemble it all
+# written across several turns -- this one asks ChatGPT to assemble it all
 # into the complete resume content, using what it already has in context
 # rather than that shape being built by Python string concatenation
 # (_assemble_resume_content, the fallback for when this step is unavailable
 # or its reply doesn't parse). No placeholders, and like the revision and
-# keywords prompts below, nothing is appended in code -- sent to DeepSeek
+# keywords prompts below, nothing is appended in code -- sent to ChatGPT
 # exactly as written on the Profile page (_build_whole_resume_message in
 # experience_service.py). A reply that doesn't parse (e.g. _parse_final_reply
 # finding no XML and no recognizable labels) just falls back to
@@ -210,13 +210,13 @@ Rules:
 - Make the two companies' bullets consistent with each other in tone and level of detail.
 - Do not shorten, combine, or drop any bullet."""
 
-# Step 8, the pipeline's last step: a fresh ChatGPT chat revises the bullets,
-# summary, and skill set DeepSeek just wrote, and finalizes the resume's
-# titles from step 5's draft into clean, separated lines. No placeholders —
-# the content is handed over separately (see _build_revision_message in
-# experience_service.py, which also appends the fixed, non-editable request
-# to sort the skill set into categories and re-emit the titles), so this is
-# pure style instruction, applied to "the resume I just gave you".
+# Step 8, still in the same chat: revises the bullets, summary, and skill
+# set this chat already wrote, and finalizes the resume's titles from step
+# 5's draft into clean, separated lines. No placeholders — the resume
+# content is included in the same message (see _build_revision_message in
+# experience_service.py, which sends only that content plus this prompt
+# exactly as written here, nothing appended), so this is pure style
+# instruction, applied to "the resume I just gave you".
 DEFAULT_REVISION_PROMPT = """Revise this resume.
 
 - Keep a FAANG-style writing approach.
@@ -229,12 +229,12 @@ DEFAULT_REVISION_PROMPT = """Revise this resume.
   Frameworks, Cloud & Infrastructure) rather than one long undifferentiated list.
 - Write in natural, native English."""
 
-# Step 8b: a second message in the SAME ChatGPT chat as the revision above --
-# not a fresh chat, so it still has the revised text in context (see
-# _build_keyword_message in experience_service.py, which appends the reply
-# format request; this half is pure style instruction). The [bracket] marker
-# is what the PDF renderer looks for to bold a word (RichText/parseBold in
-# frontend/src/resume/format.ts).
+# Step 9: one further message in that same chat, right after the revision
+# above, so it still has the revised text in context (see
+# _build_keyword_message in experience_service.py, which sends this prompt
+# exactly as written here, nothing appended -- pure style instruction). The
+# [bracket] marker is what the PDF renderer looks for to bold a word
+# (RichText/parseBold in frontend/src/resume/format.ts).
 DEFAULT_KEYWORDS_PROMPT = """Now mark the main keywords in the resume you just gave me.
 
 - Wrap each important keyword or phrase in square brackets, like [REST API].
@@ -319,14 +319,14 @@ DEFAULTS: dict[str, Any] = {
     # Steps 3a/3b: one summary per role (Job 1, Job 2), introducing that
     # company/product above its bullets.
     "companySummaryPrompt": DEFAULT_COMPANY_SUMMARY_PROMPT,
-    # Step 6: the resume's skill set, written in the DeepSeek chat.
+    # Step 6: the resume's skill set, written in this chat.
     "skillSetPrompt": DEFAULT_SKILL_SET_PROMPT,
-    # Step 7: DeepSeek assembles everything above into the complete resume,
-    # still in the same chat, before handoff to ChatGPT.
+    # Step 7: ChatGPT assembles everything above into the complete resume,
+    # still in this same chat, before steps 8-9 revise it.
     "wholeResumePrompt": DEFAULT_WHOLE_RESUME_PROMPT,
-    # Step 8: a fresh ChatGPT chat revises the bullets and summary.
+    # Step 8: revises the bullets and summary, still in this same chat.
     "revisionPrompt": DEFAULT_REVISION_PROMPT,
-    # Step 8b: a second message in that same ChatGPT chat, marking keywords.
+    # Step 9: a further message in that same chat, marking keywords.
     "keywordsPrompt": DEFAULT_KEYWORDS_PROMPT,
     # Not part of extraction: builds a profile's database.json on demand.
     "corpusPrompt": DEFAULT_CORPUS_PROMPT,

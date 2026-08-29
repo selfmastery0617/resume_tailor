@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence
 
 if TYPE_CHECKING:
-    from app.services.deepseek import DeepSeekConversation
+    from app.services.chatgpt_conversation import ChatGPTConversation
 
 from sqlalchemy import func
 
@@ -118,27 +118,29 @@ def _rank(
     label: str = "",
     industry: str = "",
     industry_weight: float = INDUSTRY_SIMILARITY_WEIGHT,
+    log_documents: bool = True,
 ) -> list[ScoredChallenge]:
     if not rows:
         return []
     import time as _time
 
     documents = [r[0].search_text() for r in rows]
-    progress.emit(
-        label or "rank",
-        f"Combined search text for {len(documents)} challenges",
-        level="info",
-        documents=[
-            {
-                "id": challenge.id,
-                "company": entry.company,
-                "product": entry.product,
-                "project": project.name,
-                "text": text,
-            }
-            for (challenge, project, entry), text in zip(rows, documents)
-        ],
-    )
+    if log_documents:
+        progress.emit(
+            label or "rank",
+            f"Combined search text for {len(documents)} challenges",
+            level="info",
+            documents=[
+                {
+                    "id": challenge.id,
+                    "company": entry.company,
+                    "product": entry.product,
+                    "project": project.name,
+                    "text": text,
+                }
+                for (challenge, project, entry), text in zip(rows, documents)
+            ],
+        )
 
     started = _time.monotonic()
     scores = vector_search.score_documents(query, documents)
@@ -327,6 +329,12 @@ def _select_job2(
     scored = _rank(
         query, _flatten(candidates), label="job2", industry=industry,
         industry_weight=industry_weight,
+        # Job 2 now ranks the whole corpus minus Job 1's company (see
+        # entries_excluding), which can be a lot of challenges -- the console
+        # panel doesn't need every one of their combined search texts the
+        # way Job 1's single-company list is small enough to be worth
+        # showing in full.
+        log_documents=False,
     )
     if not scored:
         raise ExperienceExtractionError("The other companies have no challenges to extract from.")
@@ -536,7 +544,7 @@ def _build_companies_announcement(
 
 
 async def _announce_companies(
-    chat: "DeepSeekConversation | None",
+    chat: "ChatGPTConversation | None",
     job1: JobSelection,
     job1_picked: Sequence[ScoredChallenge],
     job2: JobSelection,
@@ -570,7 +578,7 @@ async def _announce_companies(
 
 
 async def _generate_bullets(
-    chat: "DeepSeekConversation | None",
+    chat: "ChatGPTConversation | None",
     picked: Sequence[ScoredChallenge],
     selection: JobSelection,
     job_description: str,
@@ -603,7 +611,7 @@ async def _generate_bullets(
             "company": selection.company,
             "product": selection.product,
             "role_order": ROLE_ORDER_LABELS[role_key],
-            "job_description": job_description[:4000],
+            "job_description": job_description,
             "achievements": facts,
         },
     )
@@ -635,13 +643,13 @@ async def _generate_bullets(
                         existing.add(extra.lower()[:40])
             progress.emit(
                 "generate",
-                f"DeepSeek returned {len(bullets)} bullets",
+                f"ChatGPT returned {len(bullets)} bullets",
                 level="result",
             )
             return bullets[:count], "deepseek"
         progress.emit(
             "generate",
-            f"DeepSeek returned only {len(bullets)} usable lines — composing from source instead",
+            f"ChatGPT returned only {len(bullets)} usable lines — composing from source instead",
             level="warn",
             # Nothing else logs what the reply actually said on this path, so a
             # bad-shaped reply (prose instead of a list, a refusal, ...) was
@@ -663,27 +671,33 @@ async def _generate_bullets(
 
 
 @asynccontextmanager
-async def _chat_session() -> AsyncIterator["DeepSeekConversation | None"]:
-    """One DeepSeek chat for the whole job, or None if it can't be opened.
+async def _chat_session() -> AsyncIterator["ChatGPTConversation | None"]:
+    """One ChatGPT chat for the whole job (steps 1-7), or None if it can't
+    be opened.
 
     A missing or expired session must not fail the extraction — every step has a
     deterministic fallback — so a failed sign-in is reported and yields None.
 
-    The class-level prompt lock is held for the whole conversation: the browser
-    profile can only be opened once at a time, so two extractions must queue
-    here rather than fight over the profile directory.
+    The prompt lock is the SAME one chatgpt.ask()/ask_chained_turns() use
+    (see _revise_with_chatgpt, steps 8-9) — held for this conversation's
+    whole lifetime, since the browser profile can only be opened once at a
+    time. _revise_with_chatgpt only ever runs after this block has fully
+    exited (see its own docstring), so the two never actually contend for
+    it; sharing the lock just makes that ordering enforced rather than
+    assumed.
     """
-    from app.services.deepseek import DeepSeekConversation, DeepSeekService
+    from app.services import chatgpt
+    from app.services.chatgpt_conversation import ChatGPTConversation
 
-    lock = DeepSeekService._get_prompt_lock()
+    lock = chatgpt._get_prompt_lock()
     async with lock:
-        conversation = DeepSeekConversation()
+        conversation = ChatGPTConversation()
         try:
             await conversation.start()
         except Exception as exc:  # noqa: BLE001 - expired session or no browser
             progress.emit(
                 "session",
-                f"DeepSeek unavailable ({type(exc).__name__}) — "
+                f"ChatGPT unavailable ({type(exc).__name__}) — "
                 "composing everything from database.json",
                 level="warn",
             )
@@ -692,7 +706,7 @@ async def _chat_session() -> AsyncIterator["DeepSeekConversation | None"]:
 
         progress.emit(
             "session",
-            "Opened one DeepSeek chat for this job",
+            "Opened one ChatGPT chat for this job",
             level="step",
         )
         try:
@@ -730,7 +744,7 @@ def _parse_extraction_reply(reply: str) -> dict[str, str]:
 
 
 async def _extract_job_fields(
-    chat: "DeepSeekConversation | None",
+    chat: "ChatGPTConversation | None",
     job_description: str,
     existing_mission: str,
 ) -> dict[str, str]:
@@ -743,7 +757,7 @@ async def _extract_job_fields(
     from app.services import settings_service
 
     prompt_template = settings_service.get_settings().get("skillsPrompt") or ""
-    prompt = f"{prompt_template}\n\nJob Description:\n{job_description[:4000]}"
+    prompt = f"{prompt_template}\n\nJob Description:\n{job_description}"
 
     progress.emit(
         "skills",
@@ -820,7 +834,7 @@ def _clean_summary(reply: str) -> str:
 
 
 async def _generate_summary(
-    chat: "DeepSeekConversation | None",
+    chat: "ChatGPTConversation | None",
     job1: JobSelection,
     job2: JobSelection,
     job_description: str,
@@ -831,7 +845,7 @@ async def _generate_summary(
     Returns (summary, source) where source is 'deepseek' or 'none'. There is no
     deterministic fallback: a summary is a claim about the candidate as a whole,
     and composing one from template text would be inventing that claim. When
-    DeepSeek is unavailable the resume simply keeps the profile's own summary.
+    ChatGPT is unavailable the resume simply keeps the profile's own summary.
     """
     from app.services import settings_service
 
@@ -849,7 +863,7 @@ async def _generate_summary(
         {
             "sentences": SUMMARY_SENTENCES,
             "job_title": job_title or "this role",
-            "job_description": job_description[:4000],
+            "job_description": job_description,
             "companies": companies,
             "bullets": "\n".join(f"- {b}" for b in bullets),
         },
@@ -864,7 +878,7 @@ async def _generate_summary(
     if chat is None:
         progress.emit(
             "summary",
-            "DeepSeek unavailable — keeping the profile's own summary",
+            "ChatGPT unavailable — keeping the profile's own summary",
             level="warn",
         )
         return "", "none"
@@ -880,7 +894,7 @@ async def _generate_summary(
             )
             return summary, "deepseek"
         progress.emit(
-            "summary", "DeepSeek returned an empty summary", level="warn"
+            "summary", "ChatGPT returned an empty summary", level="warn"
         )
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
@@ -893,7 +907,7 @@ async def _generate_summary(
 
 
 async def _generate_company_summary(
-    chat: "DeepSeekConversation | None",
+    chat: "ChatGPTConversation | None",
     selection: JobSelection,
     job_description: str,
     job_title: str,
@@ -924,7 +938,7 @@ async def _generate_company_summary(
             "company": selection.company,
             "product": selection.product,
             "job_title": job_title or "this role",
-            "job_description": job_description[:4000],
+            "job_description": job_description,
             "bullets": "\n".join(f"- {b}" for b in selection.bullets),
         },
     )
@@ -938,7 +952,7 @@ async def _generate_company_summary(
     if chat is None:
         progress.emit(
             "companySummary",
-            "DeepSeek unavailable — keeping the existing company summary",
+            "ChatGPT unavailable — keeping the existing company summary",
             level="warn",
         )
         return selection.company_summary, "none"
@@ -954,7 +968,7 @@ async def _generate_company_summary(
             )
             return summary, "deepseek"
         progress.emit(
-            "companySummary", "DeepSeek returned an empty company summary", level="warn"
+            "companySummary", "ChatGPT returned an empty company summary", level="warn"
         )
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
@@ -1023,7 +1037,7 @@ def _build_titles_message(
     title_prompt: str,
 ) -> str:
     """One message asking for all three titles at once -- the resume-wide
-    headline and each company's own -- so drafting them costs one DeepSeek
+    headline and each company's own -- so drafting them costs one ChatGPT
     turn instead of three. Renders titlePrompt with the combined bullets
     (job2 first, most recent); titlePrompt's own rules already say what's
     wanted (one overall title, one per company), so no fixed format request
@@ -1039,7 +1053,7 @@ def _build_titles_message(
         {
             "job_title": job_title or "this role",
             "current_title": current_title or "",
-            "job_description": job_description[:4000],
+            "job_description": job_description,
             "summary": summary,
             "bullets": "\n".join(f"- {b}" for b in bullets),
         },
@@ -1047,7 +1061,7 @@ def _build_titles_message(
 
 
 async def _draft_titles(
-    chat: "DeepSeekConversation | None",
+    chat: "ChatGPTConversation | None",
     job1: JobSelection,
     job2: JobSelection,
     summary: str,
@@ -1056,7 +1070,7 @@ async def _draft_titles(
     job_title: str,
 ) -> str:
     """Step 5: a first draft of all three headlines -- the resume-wide title
-    and each company's own -- in ONE DeepSeek turn. Written once the summary
+    and each company's own -- in ONE ChatGPT turn. Written once the summary
     exists so it can draw on it, same reasoning _generate_summary uses for
     reading the bullets first.
 
@@ -1077,7 +1091,7 @@ async def _draft_titles(
     build_tailored_data() in tailored_resume_service.py for the fallback
     when even that never runs).
 
-    Returns "" if there are no bullets yet, DeepSeek is unavailable, or the
+    Returns "" if there are no bullets yet, ChatGPT is unavailable, or the
     call fails -- an empty draft just means ChatGPT is asked to write the
     titles from scratch in step 8 rather than refine a draft.
     """
@@ -1098,7 +1112,7 @@ async def _draft_titles(
     progress.emit("title", "Drafting the resume and role titles…", level="step")
 
     if chat is None:
-        progress.emit("title", "DeepSeek unavailable — no title draft", level="warn")
+        progress.emit("title", "ChatGPT unavailable — no title draft", level="warn")
         return ""
 
     try:
@@ -1138,13 +1152,13 @@ def _parse_skill_list(reply: str) -> list[str]:
 
 
 async def _generate_skill_set(
-    chat: "DeepSeekConversation | None",
+    chat: "ChatGPTConversation | None",
     job1: JobSelection,
     job2: JobSelection,
     job_description: str,
     job_title: str,
 ) -> tuple[list[str], str]:
-    """Step 6, the DeepSeek chat's last step: the resume's skill set, written
+    """Step 6, the ChatGPT chat's last step: the resume's skill set, written
     from the bullets that now exist, before the chat closes and hands off to
     ChatGPT. Where it lands on the rendered resume is up to the template's
     own "skills" block placement, not this function.
@@ -1152,7 +1166,7 @@ async def _generate_skill_set(
     Returns (skills, source) where source is 'deepseek' or 'none'. Like the
     summary and title, there is no deterministic fallback: a skill set is a
     claim about the candidate, and composing one from a template would be
-    inventing it. When DeepSeek is unavailable the resume keeps the
+    inventing it. When ChatGPT is unavailable the resume keeps the
     profile's own skills (see build_tailored_data in
     tailored_resume_service.py).
     """
@@ -1170,7 +1184,7 @@ async def _generate_skill_set(
         template,
         {
             "job_title": job_title or "this role",
-            "job_description": job_description[:4000],
+            "job_description": job_description,
             "bullets": "\n".join(f"- {b}" for b in bullets),
         },
     )
@@ -1180,7 +1194,7 @@ async def _generate_skill_set(
     if chat is None:
         progress.emit(
             "skillSet",
-            "DeepSeek unavailable — keeping the profile's own skills",
+            "ChatGPT unavailable — keeping the profile's own skills",
             level="warn",
         )
         return [], "none"
@@ -1195,7 +1209,7 @@ async def _generate_skill_set(
                 preview=", ".join(skills),
             )
             return skills, "deepseek"
-        progress.emit("skillSet", "DeepSeek returned an empty skill set", level="warn")
+        progress.emit("skillSet", "ChatGPT returned an empty skill set", level="warn")
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
             "skillSet",
@@ -1214,7 +1228,7 @@ def _assemble_resume_content(
     summary: str,
     skill_set: Sequence[str],
 ) -> str:
-    """The same structured shape _generate_whole_resume asks DeepSeek to
+    """The same structured shape _generate_whole_resume asks ChatGPT to
     produce (step 7), built here instead by plain string concatenation --
     the fallback used when that step is unavailable, fails, or its reply
     doesn't parse. Nothing is lost either way: every fact here already
@@ -1234,24 +1248,24 @@ def _assemble_resume_content(
 
 
 def _build_whole_resume_message(whole_resume_prompt: str) -> str:
-    """Step 7's message: unlike _build_revision_message (a FRESH ChatGPT
-    chat with none of this in context), this runs in the SAME DeepSeek chat
-    everything was already written in, so it doesn't repaste the bullets,
-    summaries, or skill set -- just the user's own assembly instructions
-    from the Profile page, sent exactly as written, with nothing appended
-    (matching _build_revision_message and _build_keyword_message).
+    """Step 7's message: runs in the same chat steps 1-6 were already
+    written in, so unlike _build_revision_message (step 8, which repastes
+    the assembled resume_content explicitly -- see its own docstring for
+    why), this one doesn't repaste the bullets, summaries, or skill set --
+    just the user's own assembly instructions from the Profile page, sent
+    exactly as written, with nothing appended (matching _build_keyword_message).
     """
     return whole_resume_prompt
 
 
 async def _generate_whole_resume(
-    chat: "DeepSeekConversation | None",
+    chat: "ChatGPTConversation | None",
     job1: JobSelection,
     job2: JobSelection,
     summary: str,
     skill_set: Sequence[str],
 ) -> tuple[str, str]:
-    """Step 7: DeepSeek assembles the complete resume content from
+    """Step 7: ChatGPT assembles the complete resume content from
     everything already written in this chat -- both companies' bullets and
     summaries, the overall summary, the skill set -- into the same
     structured shape ChatGPT's revision step (and _parse_revision_reply)
@@ -1280,7 +1294,7 @@ async def _generate_whole_resume(
     if chat is None:
         progress.emit(
             "assemble",
-            "DeepSeek unavailable — assembling the resume from the pieces already written",
+            "ChatGPT unavailable — assembling the resume from the pieces already written",
             level="warn",
         )
         return "", "none"
@@ -1295,7 +1309,7 @@ async def _generate_whole_resume(
             return reply, "deepseek"
         progress.emit(
             "assemble",
-            "DeepSeek's assembly did not parse — assembling the resume "
+            "ChatGPT's assembly did not parse — assembling the resume "
             "from the pieces already written instead",
             level="warn",
             preview=reply[:300],
@@ -1311,15 +1325,22 @@ async def _generate_whole_resume(
 
 
 def _build_revision_message(resume_content: str, revision_prompt: str) -> str:
-    """One message: the resume content -- DeepSeek's own step-7 assembly, or
-    _assemble_resume_content's programmatic fallback -- then the user's
-    revision instructions from the Profile page, exactly as written. No
-    fixed format request is appended here -- only the content and the
-    prompt as edited, nothing added to it.
+    """One message: the resume content -- this chat's own step-7
+    assembly, or _assemble_resume_content's programmatic fallback -- then
+    the user's revision instructions from the Profile page, exactly as
+    written. No fixed format request is appended here -- only the content
+    and the prompt as edited, nothing added to it.
+
+    The content is repasted explicitly even though this runs in the same
+    chat that (usually) already wrote it: when step 7 didn't produce
+    something usable, resume_content is _assemble_resume_content's
+    programmatic fallback instead, plain Python string concatenation the
+    model never actually said -- so it can't be assumed to already be in
+    context the way steps 1-9's own turns are.
 
     Because nothing here asks ChatGPT to reply in the labeled shape
     _parse_revision_reply looks for, that parse will often fail and this
-    step will often come back as applied=False, keeping DeepSeek's own
+    step will often come back as applied=False, keeping the pre-revision
     text -- see _revise_with_chatgpt's docstring. That's expected, not a
     bug to fix: this function sends only what's asked for.
     """
@@ -1701,6 +1722,7 @@ def _parse_final_reply(
 
 
 async def _revise_with_chatgpt(
+    chat: "ChatGPTConversation | None",
     resume_content: str,
     job1_bullets: list[str],
     job2_bullets: list[str],
@@ -1711,26 +1733,27 @@ async def _revise_with_chatgpt(
     job1_company: str,
     job2_company: str,
 ) -> tuple[list[str], list[str], str, str, str, list[tuple[str, list[str]]], str, str, str, bool]:
-    """Step 8, the pipeline's last step: a fresh ChatGPT chat revises the
-    bullets, company summaries, overall summary, and skill set -- DeepSeek's
-    own step-7 assembly (resume_content, which also carries step 5's title
-    draft along as unstructured text -- see extract_experience), sorting the
-    flat skill list into categories and finalizing the titles into the same
-    structured reply along the way -- then a second message in that SAME
-    chat (step 8b) asks it to mark the main keywords by wrapping them in
-    [square brackets] -- the PDF renders those bold (RichText/parseBold in
-    frontend/src/resume/format.ts).
+    """Steps 8-9, the pipeline's last steps: two more messages in the SAME
+    chat everything else ran in (see extract_experience) -- one revising
+    the bullets, company summaries, overall summary, and skill set from
+    what this chat already assembled itself (resume_content, step 7's
+    output, or _assemble_resume_content's fallback; also carries step 5's
+    title draft along as unstructured text), sorting the flat skill list
+    into categories and finalizing the titles into the same structured
+    reply along the way -- then a second message (step 9) asking it to
+    mark the main keywords by wrapping them in [square brackets] -- the PDF
+    renders those bold (RichText/parseBold in frontend/src/resume/format.ts).
 
     Returns (job1_bullets, job2_bullets, job1_company_summary,
     job2_company_summary, summary, skill_groups, resume_title, job1_title,
-    job2_title, applied) — applied=False only when ChatGPT isn't connected,
-    the call fails outright, or the reply has no recognizable structure at
-    all (see _parse_revision_reply). Once there's a structural match,
-    applied=True and every field is taken from it independently -- any
-    field that came back empty (the model found the heading but wrote
-    nothing usable under it) falls back to the pre-revision value instead
-    of overwriting good content with nothing, but that's a per-field
-    substitution, not a reason to discard the run.
+    job2_title, applied) — applied=False only when chat is None (ChatGPT
+    never connected -- see _chat_session), the call fails outright, or the
+    reply has no recognizable structure at all (see _parse_final_reply).
+    Once there's a structural match, applied=True and every field is taken
+    from it independently -- any field that came back empty (the model
+    found the heading but wrote nothing usable under it) falls back to the
+    pre-revision value instead of overwriting good content with nothing,
+    but that's a per-field substitution, not a reason to discard the run.
 
     There's no format request in the outgoing message telling ChatGPT what
     shape to answer in (see _build_revision_message), so this is
@@ -1739,12 +1762,8 @@ async def _revise_with_chatgpt(
     keyword pass is applied the same way: if it fails or doesn't parse, the
     run keeps the (still successfully revised, still applied=True) un-marked
     text rather than reverting the whole revision over the keyword step
-    alone.
-
-    Must run after _chat_session()'s conversation has fully closed: ChatGPT
-    and DeepSeek share one browser profile, and that block holds the
-    profile's lock for its entire lifetime. Calling this from inside it would
-    wait forever for a lock that only releases once the outer block exits.
+    alone -- and isn't even asked for when the revision reply itself didn't
+    parse, since there'd be nothing sensible to mark.
     """
     if not job1_bullets or not job2_bullets or not summary:
         return (
@@ -1752,26 +1771,10 @@ async def _revise_with_chatgpt(
             summary, [], "", "", "", False,
         )
 
-    from app.services import chatgpt, chatgpt_session, settings_service
-
-    try:
-        status = await chatgpt_session.verify_session()
-    except Exception as exc:  # noqa: BLE001 - a status check must never crash extraction
+    if chat is None:
         progress.emit(
             "revision",
-            f"Could not check the ChatGPT session ({type(exc).__name__}) — "
-            "keeping DeepSeek's bullets and summary",
-            level="warn",
-        )
-        return (
-            job1_bullets, job2_bullets, job1_company_summary, job2_company_summary,
-            summary, [], "", "", "", False,
-        )
-
-    if not status.get("connected"):
-        progress.emit(
-            "revision",
-            "ChatGPT is not connected — keeping DeepSeek's bullets and "
+            "ChatGPT is not connected — keeping the pre-revision bullets and "
             "summary. Connect ChatGPT in Settings to enable the final "
             "revision pass.",
             level="info",
@@ -1780,6 +1783,8 @@ async def _revise_with_chatgpt(
             job1_bullets, job2_bullets, job1_company_summary, job2_company_summary,
             summary, [], "", "", "", False,
         )
+
+    from app.services import settings_service
 
     settings = settings_service.get_settings()
 
@@ -1793,27 +1798,14 @@ async def _revise_with_chatgpt(
     if not keywords_template:
         keywords_template = settings_service.DEFAULT_KEYWORDS_PROMPT
 
-    def build_keyword_followup(replies: list[str]) -> str | None:
-        # Only worth asking to mark keywords in a reply that itself parsed
-        # into something usable -- nothing sensible to mark otherwise, and
-        # the outer parse below will already revert to DeepSeek's version.
-        parsed = _parse_final_reply(
-            replies[-1], len(job1_bullets), len(job2_bullets), job1_company, job2_company
-        )
-        if parsed is None:
-            return None
-        return _build_keyword_message(keywords_template)
-
     progress.emit(
         "revision",
-        "Sending the resume to a new ChatGPT chat for final revision…",
+        "Sending the resume for final revision, in the same chat…",
         level="step",
     )
 
     try:
-        replies = await chatgpt.ask_chained_turns(message, [build_keyword_followup])
-        reply = replies[0]
-        keyword_reply = replies[1] if len(replies) > 1 else ""
+        reply = await chat.ask(message)
 
         progress.emit(
             "revision",
@@ -1821,13 +1813,6 @@ async def _revise_with_chatgpt(
             level="info",
             preview=reply,
         )
-        if keyword_reply:
-            progress.emit(
-                "revision",
-                "ChatGPT's keyword-marking reply:",
-                level="info",
-                preview=keyword_reply,
-            )
 
         parsed = _parse_final_reply(
             reply, len(job1_bullets), len(job2_bullets), job1_company, job2_company
@@ -1836,7 +1821,7 @@ async def _revise_with_chatgpt(
             progress.emit(
                 "revision",
                 "ChatGPT's revision had no recognizable structure at all — "
-                "keeping DeepSeek's version",
+                "keeping the pre-revision version",
                 level="warn",
             )
             return (
@@ -1861,31 +1846,40 @@ async def _revise_with_chatgpt(
         new_summary = new_summary or summary
 
         keywords_marked = False
-        if keyword_reply:
-            keyword_parsed = _parse_final_reply(
-                keyword_reply, len(new_job1), len(new_job2), job1_company, job2_company
+        keyword_message = _build_keyword_message(keywords_template)
+        keyword_reply = await chat.ask(keyword_message)
+
+        progress.emit(
+            "revision",
+            "ChatGPT's keyword-marking reply:",
+            level="info",
+            preview=keyword_reply,
+        )
+
+        keyword_parsed = _parse_final_reply(
+            keyword_reply, len(new_job1), len(new_job2), job1_company, job2_company
+        )
+        if keyword_parsed is not None:
+            (
+                marked_job1, marked_job2, marked_job1_summary, marked_job2_summary,
+                marked_summary, _, marked_resume_title, marked_job1_title, marked_job2_title,
+            ) = keyword_parsed
+            new_job1 = marked_job1 or new_job1
+            new_job2 = marked_job2 or new_job2
+            new_job1_summary = marked_job1_summary or new_job1_summary
+            new_job2_summary = marked_job2_summary or new_job2_summary
+            new_summary = marked_summary or new_summary
+            resume_title = marked_resume_title or resume_title
+            job1_title = marked_job1_title or job1_title
+            job2_title = marked_job2_title or job2_title
+            keywords_marked = True
+        else:
+            progress.emit(
+                "revision",
+                "Keyword marking did not parse — keeping the revision "
+                "without keywords marked",
+                level="warn",
             )
-            if keyword_parsed is not None:
-                (
-                    marked_job1, marked_job2, marked_job1_summary, marked_job2_summary,
-                    marked_summary, _, marked_resume_title, marked_job1_title, marked_job2_title,
-                ) = keyword_parsed
-                new_job1 = marked_job1 or new_job1
-                new_job2 = marked_job2 or new_job2
-                new_job1_summary = marked_job1_summary or new_job1_summary
-                new_job2_summary = marked_job2_summary or new_job2_summary
-                new_summary = marked_summary or new_summary
-                resume_title = marked_resume_title or resume_title
-                job1_title = marked_job1_title or job1_title
-                job2_title = marked_job2_title or job2_title
-                keywords_marked = True
-            else:
-                progress.emit(
-                    "revision",
-                    "Keyword marking did not parse — keeping the revision "
-                    "without keywords marked",
-                    level="warn",
-                )
 
         progress.emit(
             "revision",
@@ -1901,11 +1895,11 @@ async def _revise_with_chatgpt(
             new_job1, new_job2, new_job1_summary, new_job2_summary, new_summary,
             skill_groups, resume_title, job1_title, job2_title, True,
         )
-    except Exception as exc:  # noqa: BLE001 - provider unavailable or reply timed out
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
         progress.emit(
             "revision",
             f"ChatGPT revision failed ({type(exc).__name__}) — keeping "
-            "DeepSeek's version",
+            "the pre-revision version",
             level="warn",
         )
 
@@ -1942,7 +1936,7 @@ async def extract_experience(
     # summaries, the overall summary, the titles, the skill set, and the
     # final whole-resume assembly (steps 1-7 below) all happen as turns in
     # the same conversation, so each prompt still has the earlier ones in
-    # context. `chat` is None when DeepSeek is unreachable, and every step
+    # context. `chat` is None when ChatGPT is unreachable, and every step
     # falls back on its own rather than failing the extraction.
     async with _chat_session() as chat:
         # Step 1: derive skills, mission, and industry from the job
@@ -1958,7 +1952,7 @@ async def extract_experience(
         else:
             fields = {"mission": job_mission} if job_mission else {}
         if not fields.get("mission"):
-            fields["mission"] = job_description[:600]
+            fields["mission"] = job_description
 
         skills = [s.strip() for s in fields.get("skills", "").split(",") if s.strip()]
         industry = fields.get("industry", "")
@@ -2027,65 +2021,69 @@ async def extract_experience(
         )
 
         # Step 6: the skill set, written in this chat, before it's all
-        # assembled for handoff to ChatGPT.
+        # assembled (step 7) and revised (steps 8-9) later in the same chat.
         skill_set, skill_set_source = await _generate_skill_set(
             chat, job1_sel, job2_sel, job_description, job_title
         )
 
-        # Step 7: DeepSeek assembles everything above into the complete
-        # resume, still in this chat, before handoff to ChatGPT.
+        # Step 7: ChatGPT assembles everything above into the complete
+        # resume, still in this chat, before steps 8-9 revise it.
         whole_resume, whole_resume_source = await _generate_whole_resume(
             chat, job1_sel, job2_sel, summary, skill_set
         )
 
-        turns = chat.turns if chat else 0
+        # Falls back to the same content built programmatically when step 7
+        # didn't produce something usable -- see _generate_whole_resume. The
+        # title draft rides along as its own section regardless of which path
+        # produced the rest -- see _draft_titles for why it's sent unparsed.
+        resume_content = whole_resume or _assemble_resume_content(
+            job1_sel.bullets, job2_sel.bullets, job1_sel.company_summary,
+            job2_sel.company_summary, summary, skill_set,
+        )
+        if titles_draft:
+            resume_content += (
+                "\n\nDraft Titles (finalize these -- overall resume title "
+                f"first, then each company's own):\n{titles_draft}"
+            )
 
-    # Falls back to the same content built programmatically when step 7
-    # didn't produce something usable -- see _generate_whole_resume. The
-    # title draft rides along as its own section regardless of which path
-    # produced the rest -- see _draft_titles for why it's sent unparsed.
-    resume_content = whole_resume or _assemble_resume_content(
-        job1_sel.bullets, job2_sel.bullets, job1_sel.company_summary,
-        job2_sel.company_summary, summary, skill_set,
-    )
-    if titles_draft:
-        resume_content += (
-            "\n\nDraft Titles (finalize these -- overall resume title "
-            f"first, then each company's own):\n{titles_draft}"
+        # Steps 8-9, still in this same chat -- the whole job's work happens
+        # in one ChatGPT session, not a first chat handed off to a second.
+        (
+            job1_sel.bullets,
+            job2_sel.bullets,
+            job1_sel.company_summary,
+            job2_sel.company_summary,
+            summary,
+            skill_groups,
+            generated_title,
+            job1_sel.title,
+            job2_sel.title,
+            revised,
+        ) = await _revise_with_chatgpt(
+            chat,
+            resume_content,
+            job1_sel.bullets,
+            job2_sel.bullets,
+            job1_sel.company_summary,
+            job2_sel.company_summary,
+            summary,
+            skill_set,
+            job1_sel.company,
+            job2_sel.company,
         )
 
-    # Step 8, run only now that DeepSeek's chat has fully closed and released
-    # the shared browser profile — see the docstring on _revise_with_chatgpt.
-    (
-        job1_sel.bullets,
-        job2_sel.bullets,
-        job1_sel.company_summary,
-        job2_sel.company_summary,
-        summary,
-        skill_groups,
-        generated_title,
-        job1_sel.title,
-        job2_sel.title,
-        revised,
-    ) = await _revise_with_chatgpt(
-        resume_content,
-        job1_sel.bullets,
-        job2_sel.bullets,
-        job1_sel.company_summary,
-        job2_sel.company_summary,
-        summary,
-        skill_set,
-        job1_sel.company,
-        job2_sel.company,
-    )
+        # After steps 8-9 too, so this reflects every turn in the session,
+        # not just steps 1-7.
+        turns = chat.turns if chat else 0
+
     title_source = "chatgpt" if generated_title else "none"
 
     progress.emit(
         "done",
         f"Finished: {len(job1_sel.bullets)} + {len(job2_sel.bullets)} bullets "
         f"({job1_sel.company} → {job2_sel.company})"
-        + (f", summary, {turns} DeepSeek turns in 1 session" if turns else "")
-        + (", assembled by DeepSeek" if whole_resume else "")
+        + (f", summary, {turns} ChatGPT turns in 1 session" if turns else "")
+        + (", assembled by ChatGPT" if whole_resume else "")
         + (", revised by ChatGPT" if revised else ""),
         level="result",
         job1={"company": job1_sel.company, "product": job1_sel.product,
@@ -2127,7 +2125,7 @@ async def extract_experience(
         "generator": (
             "chatgpt" if revised else ("deepseek" if gen1 == gen2 == "deepseek" else "fallback")
         ),
-        # How many prompts shared the one chat; 0 means DeepSeek was unavailable.
+        # How many prompts shared the one chat; 0 means ChatGPT was unavailable.
         "deepseekTurns": turns,
         "extractedAt": _now(),
     }
@@ -2169,8 +2167,8 @@ def _store_run(conn, job_row, payload: dict[str, Any]) -> None:
             state="succeeded",
             summary=payload.get("summary") or "",
             generated_title=payload.get("title") or "",
-            # JSON, not plain comma-joined: needs to carry both the flat
-            # DeepSeek list and ChatGPT's (possibly absent) categorization.
+            # JSON, not plain comma-joined: needs to carry both step 6's flat
+            # list and the revision step's (possibly absent) categorization.
             skill_set=json.dumps(
                 {
                     "flat": payload.get("skillSet") or [],

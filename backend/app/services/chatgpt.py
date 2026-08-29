@@ -237,6 +237,73 @@ def read_reply(page: Any, after: int = 0) -> str:
     return last_text
 
 
+def read_reply_since(page: Any, previous: str | None = None) -> str:
+    """Wait for the streamed reply to settle, then return its text.
+
+    Text-diffing, not bubble-count-based like read_reply() above: ChatGPT's
+    message list virtualises in a long-running conversation, unmounting
+    older bubbles as new ones arrive, so a raw bubble COUNT captured before
+    sending can drift or drop rather than only ever growing (DeepSeek's own
+    UI does exactly this -- see DeepSeekService._read_reply's docstring,
+    observed going 11 -> 2 mid-chat) -- read_reply()'s `bubble_count(page) >
+    after` check then never becomes true, and the call times out waiting
+    for a reply that already arrived. Comparing the newest bubble's TEXT
+    against what it was right before this turn's message was sent is immune
+    to that, since the newest message is always mounted.
+
+    `after`/read_reply() stays as it is for ask_chained_turns(), which only
+    ever sends a fixed one-or-two-turn chain -- short enough that
+    virtualisation is unlikely to have kicked in. This is for
+    ChatGPTConversation, which can run many more sequential turns in one
+    chat over the course of a whole extraction (see chatgpt_conversation.py).
+    """
+    started_at = time.monotonic()
+    baseline = (previous or "").strip()
+
+    # 1. Wait for a reply that is neither empty nor last turn's answer.
+    while True:
+        current = reply_text(page)
+        if current and current != baseline:
+            break
+        if time.monotonic() - started_at > REPLY_START_TIMEOUT_S:
+            raise ChatGPTTimeoutError(
+                "ChatGPT accepted the prompt but never started replying "
+                f"within {REPLY_START_TIMEOUT_S:.0f}s."
+            )
+        time.sleep(STABILITY_POLL_INTERVAL_S)
+
+    # 2. Poll until the text stops changing for the quiet period.
+    last_text = ""
+    last_change_at = time.monotonic()
+    while True:
+        current = reply_text(page)
+
+        if current != last_text:
+            last_text = current
+            last_change_at = time.monotonic()
+        elif (
+            last_text
+            and last_text != baseline
+            and time.monotonic() - last_change_at >= STABILITY_QUIET_PERIOD_S
+        ):
+            break
+
+        if time.monotonic() - started_at > REPLY_TOTAL_TIMEOUT_S:
+            # Return the partial answer rather than losing it outright -- but
+            # never hand back the previous turn's reply as if it were new.
+            if last_text and last_text != baseline:
+                return last_text
+            raise ChatGPTTimeoutError(
+                f"ChatGPT reply did not finish within {REPLY_TOTAL_TIMEOUT_S:.0f}s."
+            )
+
+        time.sleep(STABILITY_POLL_INTERVAL_S)
+
+    if not last_text:
+        raise ChatGPTResponseError("ChatGPT returned an empty reply.")
+    return last_text
+
+
 _prompt_lock: "asyncio.Lock | None" = None
 
 

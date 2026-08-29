@@ -93,14 +93,15 @@ export function ExperienceModal({ result, jobLabel, onClose }: ExperienceModalPr
           {result.generator === "fallback" && (
             <p className="notice exp-warn">
               Composed directly from database.json — the AI provider was
-              unavailable, so these are not model-generated. Reconnect DeepSeek
+              unavailable, so these are not model-generated. Reconnect ChatGPT
               in Settings and extract again for tailored wording.
             </p>
           )}
           {result.generator === "chatgpt" && (
             <p className="notice">
-              DeepSeek wrote the first draft; ChatGPT then revised the bullets
-              and summary below per the Final revision prompt in Settings.
+              ChatGPT wrote the first draft, then revised the bullets and
+              summary below later in that same chat, per the Final revision
+              prompt in Settings.
             </p>
           )}
           {result.search.mode === "lexical" && (
@@ -129,7 +130,7 @@ export function ExperienceModal({ result, jobLabel, onClose }: ExperienceModalPr
           <span className="notice">
             {allBullets.length} bullets total
             {result.deepseekTurns > 0 &&
-              ` · ${result.deepseekTurns} DeepSeek prompts in one session`}
+              ` · ${result.deepseekTurns} ChatGPT prompts in one session`}
           </span>
           <button type="button" className="primary" onClick={copyAll}>
             {copied ? "Copied ✓" : "Copy All"}

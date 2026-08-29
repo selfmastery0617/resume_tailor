@@ -6,25 +6,25 @@ export type GenerationModel = "deepseek" | "chatgpt";
 export interface AppSettings {
   skillsPrompt: string;
   tailoringPrompt: string;
-  /** Writes the resume summary from the bullets, in the same DeepSeek chat. */
+  /** Writes the resume summary from the bullets, in the same ChatGPT chat
+   *  every prompt for this job runs in. */
   summaryPrompt: string;
   /** Writes the resume headline and each company's own title together, in
    *  one turn, once the summary exists. */
   titlePrompt: string;
   /** Writes one summary per role (Job 1, Job 2), right after that role's own
-   *  bullets, in the same DeepSeek chat. */
+   *  bullets, in the same chat. */
   companySummaryPrompt: string;
-  /** Writes the resume's skill set in the DeepSeek chat, before the whole
-   *  resume is assembled. Positioned on the resume wherever the template's
-   *  own "skills" block is placed (right after Summary by default). */
+  /** Writes the resume's skill set in the same chat, before the whole
+   *  resume is assembled. Positioned on the resume wherever the
+   *  template's own "skills" block is placed (right after Summary by default). */
   skillSetPrompt: string;
-  /** Runs last in the DeepSeek chat: assembles the complete resume from
-   *  everything already written, before handoff to ChatGPT. */
+  /** Runs in the same chat: assembles the complete resume from everything
+   *  already written, before the revision prompt below revises it. */
   wholeResumePrompt: string;
-  /** Runs last, in a fresh ChatGPT chat: revises the resume DeepSeek just
-   *  assembled. */
+  /** Runs last, still in the same chat: revises the resume it just assembled. */
   revisionPrompt: string;
-  /** A second message in that SAME ChatGPT chat, marking main keywords by
+  /** One further message in that same chat, marking main keywords by
    *  wrapping them in [square brackets] -- the PDF renders those bold. */
   keywordsPrompt: string;
   /** Drafts a profile's database.json from its experience. Not part of

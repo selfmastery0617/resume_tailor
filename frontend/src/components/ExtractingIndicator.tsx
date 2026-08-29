@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-// DeepSeek replies typically land around here; used only to reassure the user
+// ChatGPT replies typically land around here; used only to reassure the user
 // that a long wait is expected rather than a hang.
 const TYPICAL_SECONDS = 40;
 
@@ -15,7 +15,7 @@ interface ExtractingIndicatorProps {
 
 /** Ticking "Extracting… 12s" badge.
  *
- *  A DeepSeek round-trip runs ~40s, so a static label reads as frozen. This
+ *  A ChatGPT round-trip runs ~40s, so a static label reads as frozen. This
  *  owns its own interval, so it re-renders itself without refreshing the grid.
  */
 export function ExtractingIndicator({
@@ -42,7 +42,7 @@ export function ExtractingIndicator({
       title={
         overdue
           ? "Taking longer than usual — it will time out on its own if it never finishes."
-          : (hint ?? `Asking DeepSeek — this usually takes about ${typicalSeconds}s.`)
+          : (hint ?? `Asking ChatGPT — this usually takes about ${typicalSeconds}s.`)
       }
     >
       <span className="spinner" aria-hidden="true" />
