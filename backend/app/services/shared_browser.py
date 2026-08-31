@@ -49,8 +49,12 @@ def _open_or_refocus(origin: str, match: re.Pattern[str]) -> Callable[[Any], Non
             None,
         )
         page = existing or context.new_page()
-        if existing is None:
-            page.goto(origin, timeout=30_000, wait_until="domcontentloaded")
+        # Always (re)navigate, even for a reused tab: a tab left open from a
+        # previous session can be showing stale, cookie-mismatched content --
+        # most notably right after sign-out clears cookies out from under it,
+        # where the SPA has no way to notice on its own. A fresh load is the
+        # only way "Sign in" reliably shows the real, current auth state.
+        page.goto(origin, timeout=30_000, wait_until="domcontentloaded")
         page.bring_to_front()
 
     return run
@@ -108,14 +112,17 @@ class SharedBrowser:
             return None
 
     def check_page(
-        self, match: re.Pattern[str], check: Callable[[Any], bool], timeout: float = 10.0
-    ) -> bool | None:
+        self, match: re.Pattern[str], check: Callable[[Any], Any], timeout: float = 10.0
+    ) -> Any | None:
         """Run `check(page)` against an already-open tab matching `match`.
 
         This is what lets a status check see a sign-in the moment it happens,
         even though the shared window's own launch holds the same profile
         lock a fresh probe would otherwise need: rather than compete for it,
         this reads the live page directly, on the thread that already owns it.
+        `check` is usually a bool predicate, but can return anything (e.g. a
+        diagnostic dict) -- the None below is reserved for "nothing live to
+        check", so a predicate's own False must stay distinguishable from it.
 
         None means either the window is not open, or no tab matches — nothing
         live to check, so the caller should fall back to its own probe.
@@ -123,7 +130,7 @@ class SharedBrowser:
         if not self.is_open():
             return None
 
-        def run(context: Any) -> bool | None:
+        def run(context: Any) -> Any | None:
             page = next(
                 (p for p in context.pages if not p.is_closed() and match.search(p.url)), None
             )

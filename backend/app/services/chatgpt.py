@@ -45,6 +45,15 @@ COMPOSER_SELECTOR = "#prompt-textarea, textarea[data-id], form textarea"
 # ProseMirror <div id="prompt-textarea">, which .fill() works on directly.
 CHAT_INPUT_SELECTOR = '#prompt-textarea[contenteditable="true"]'
 
+# Fallback for when Enter doesn't register as "submit" -- observed: the
+# composer still holding the full message afterward, nothing sent, and
+# nothing to show for it but a silent multi-minute wait for a reply that
+# will never come. Not independently verified against a live session (no
+# browser access here) -- send_message() only reaches for this after
+# confirming Enter alone didn't clear the composer, and raises a clear error
+# if this doesn't work either, rather than trusting it blindly.
+SEND_BUTTON_SELECTOR = '[data-testid="send-button"], button[aria-label="Send prompt"]'
+
 # Verified the same session: this is the assistant reply container, and each
 # ask() call opens a brand-new chat (bare https://chatgpt.com always lands on
 # an empty composer, never a restored conversation), so unlike DeepSeek there
@@ -62,10 +71,26 @@ PAGE_LOAD_TIMEOUT_MS = 45_000
 LOGIN_CHECK_TIMEOUT_S = 15.0
 LOGIN_CHECK_POLL_S = 0.5
 REPLY_START_TIMEOUT_S = 60.0
-REPLY_TOTAL_TIMEOUT_S = 180.0
+# Generous: a reasoning model (ChatGPT Pro, "high" effort) can spend several
+# minutes actually thinking before the real answer appears, with no growth in
+# the visible text to show it is still working -- see MIN_STABLE_REPLY_CHARS.
+REPLY_TOTAL_TIMEOUT_S = 600.0
 STABILITY_POLL_INTERVAL_S = 0.5
 # Reply is considered finished once its text stops growing for this long.
 STABILITY_QUIET_PERIOD_S = 2.0
+# A reasoning model's bubble shows a short "Thinking..." placeholder that sits
+# unchanged for long stretches while it works -- long enough to look "stable"
+# well before real content exists. Below this length, stability alone is not
+# enough to call a reply done; only REPLY_TOTAL_TIMEOUT_S expiring will force
+# one through, same as any other partial reply.
+MIN_STABLE_REPLY_CHARS = 40
+# Playwright's own default action timeout (30s) is tuned for a normal-sized
+# prompt; a message carrying a large JSON payload (e.g. step 4's -- step 3's
+# full candidate list, computed outside the chat and pasted in whole) can
+# take longer than that just to type into the contenteditable composer,
+# independent of anything about waiting for a reply. This governs
+# send_message()'s click()/fill() specifically, not reply waiting.
+SEND_ACTION_TIMEOUT_MS = 90_000
 
 __all__ = [
     "PROFILE_DIR",
@@ -76,6 +101,7 @@ __all__ = [
     "CHAT_INPUT_SELECTOR",
     "ASSISTANT_MESSAGE_SELECTOR",
     "is_signed_in",
+    "has_session_cookie",
     "ask",
     "ask_chained_turns",
     "ChatGPTError",
@@ -114,13 +140,21 @@ def is_signed_in(page: Any) -> bool:
     Requiring both avoids saving a half-finished session: the cookie can appear
     during a multi-step login before the account is actually usable.
     """
+    return has_session_cookie(page) and page.locator(COMPOSER_SELECTOR).count() > 0
+
+
+def has_session_cookie(page: Any) -> bool:
+    """Whether the shared profile holds a live ChatGPT session cookie.
+
+    Matches by prefix, not exact name: NextAuth chunks a session token too
+    large for one cookie into SESSION_COOKIE + ".0", ".1", ... and never sets
+    the bare name in that case, so an exact match misses a real, signed-in
+    session outright.
+    """
     cookies = page.context.cookies()
-    has_cookie = any(
-        c.get("name") == SESSION_COOKIE and c.get("value") for c in cookies
+    return any(
+        c.get("name", "").startswith(SESSION_COOKIE) and c.get("value") for c in cookies
     )
-    if not has_cookie:
-        return False
-    return page.locator(COMPOSER_SELECTOR).count() > 0
 
 
 # -- single-shot prompting --------------------------------------------------
@@ -154,14 +188,99 @@ def assert_logged_in(page: Any) -> None:
         page.wait_for_timeout(int(LOGIN_CHECK_POLL_S * 1000))
 
 
+def _paste_into_composer(chat_input: Any, message: str) -> None:
+    """Insert `message` via a synthetic paste event instead of fill().
+
+    fill() types into the contenteditable ProseMirror editor character by
+    character under the hood; observed silently under-filling it for a very
+    large message (a step 3 payload with full retrieved-challenge evidence
+    now regularly exceeds what fill() reliably lands), after which Enter
+    just submits whatever partial text did land. A paste event is a single
+    atomic operation the editor's own paste handler processes in one shot,
+    the same way a person pasting a huge block of text would -- no OS
+    clipboard access needed, since the DataTransfer is constructed directly.
+    """
+    chat_input.fill("", timeout=SEND_ACTION_TIMEOUT_MS)
+    chat_input.evaluate(
+        """(el, text) => {
+            el.focus();
+            const dt = new DataTransfer();
+            dt.setData('text/plain', text);
+            const evt = new ClipboardEvent('paste', {
+                clipboardData: dt, bubbles: true, cancelable: true,
+            });
+            el.dispatchEvent(evt);
+        }""",
+        message,
+    )
+
+
+def _wait_for_composer_to_clear(
+    page: Any, chat_input: Any, message: str, timeout_s: float = 5.0
+) -> bool:
+    """Poll up to `timeout_s` for the composer to empty out after a submit
+    attempt, rather than a single fixed-delay check right after -- the page
+    can still be settling from rendering a large previous reply exactly when
+    this runs, and a snap check would misread that brief lag as a genuine
+    failure to submit.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if len(chat_input.inner_text()) <= len(message) * 0.5:
+            return True
+        if time.monotonic() > deadline:
+            return False
+        page.wait_for_timeout(int(STABILITY_POLL_INTERVAL_S * 1000))
+
+
 def send_message(page: Any, message: str) -> None:
     chat_input = page.locator(CHAT_INPUT_SELECTOR).first
-    chat_input.click()
+    chat_input.click(timeout=SEND_ACTION_TIMEOUT_MS)
     # fill() writes directly into the contenteditable ProseMirror editor, same
-    # as it would a plain textarea's value — confirmed working, no keystroke
-    # simulation needed.
-    chat_input.fill(message)
+    # as it would a plain textarea's value — confirmed working for ordinary
+    # messages, no keystroke simulation needed. Explicit timeout: see
+    # SEND_ACTION_TIMEOUT_MS -- a large message can take longer to type than
+    # Playwright's 30s default.
+    chat_input.fill(message, timeout=SEND_ACTION_TIMEOUT_MS)
+
+    # Verify what actually landed before submitting -- fill() can silently
+    # under-fill this editor for a very large message (see
+    # _paste_into_composer's docstring). Submitting a truncated prompt with
+    # Enter would send a broken request and confuse the whole turn, so catch
+    # it here instead.
+    landed = chat_input.inner_text()
+    if len(landed) < len(message) * 0.95:
+        _paste_into_composer(chat_input, message)
+        landed = chat_input.inner_text()
+        if len(landed) < len(message) * 0.95:
+            raise ChatGPTError(
+                "ChatGPT's composer did not accept the full message "
+                f"({len(landed)} of {len(message)} characters landed) -- "
+                "not sending, to avoid submitting a truncated prompt."
+            )
+
     page.keyboard.press("Enter")
+
+    # Enter alone does not always register as "submit" on this composer --
+    # confirm the composer actually cleared, and fall back to clicking the
+    # send button directly if it's still sitting there holding the message.
+    # Without this, a failed submit looks identical to a slow reply: nothing
+    # raises, and the caller just waits out the full reply timeout for a
+    # turn that was never actually asked. Polled rather than a single fixed
+    # wait: the page can still be settling from a large previous reply right
+    # when this runs, and a snap check right after Enter would misread that
+    # brief lag as a genuine failure to submit.
+    if not _wait_for_composer_to_clear(page, chat_input, message):
+        send_button = page.locator(SEND_BUTTON_SELECTOR).first
+        if send_button.count() > 0:
+            send_button.click(timeout=SEND_ACTION_TIMEOUT_MS)
+        if not _wait_for_composer_to_clear(page, chat_input, message):
+            raise ChatGPTError(
+                "ChatGPT did not submit the message -- the composer still "
+                "holds it after pressing Enter (and clicking Send, if a "
+                "send button was found). Not waiting for a reply that will "
+                "never come."
+            )
 
 
 def reply_text(page: Any) -> str:
@@ -219,7 +338,10 @@ def read_reply(page: Any, after: int = 0) -> str:
         if current != last_text:
             last_text = current
             last_change_at = time.monotonic()
-        elif time.monotonic() - last_change_at >= STABILITY_QUIET_PERIOD_S:
+        elif (
+            len(last_text) >= MIN_STABLE_REPLY_CHARS
+            and time.monotonic() - last_change_at >= STABILITY_QUIET_PERIOD_S
+        ):
             break
 
         if time.monotonic() - started_at > REPLY_TOTAL_TIMEOUT_S:
@@ -282,7 +404,7 @@ def read_reply_since(page: Any, previous: str | None = None) -> str:
             last_text = current
             last_change_at = time.monotonic()
         elif (
-            last_text
+            len(last_text) >= MIN_STABLE_REPLY_CHARS
             and last_text != baseline
             and time.monotonic() - last_change_at >= STABILITY_QUIET_PERIOD_S
         ):

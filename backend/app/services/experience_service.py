@@ -571,7 +571,7 @@ async def _announce_companies(
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
             "announce",
-            f"Could not send the company introduction ({type(exc).__name__}) — "
+            f"Could not send the company introduction ({_exc_label(exc)}) — "
             "continuing without it",
             level="warn",
         )
@@ -660,7 +660,7 @@ async def _generate_bullets(
     except Exception as exc:  # noqa: BLE001 - provider unavailable or session expired
         progress.emit(
             "generate",
-            f"AI generation unavailable ({type(exc).__name__}) — composing from database.json",
+            f"AI generation unavailable ({_exc_label(exc)}) — composing from database.json",
             level="warn",
         )
 
@@ -697,7 +697,7 @@ async def _chat_session() -> AsyncIterator["ChatGPTConversation | None"]:
         except Exception as exc:  # noqa: BLE001 - expired session or no browser
             progress.emit(
                 "session",
-                f"ChatGPT unavailable ({type(exc).__name__}) — "
+                f"ChatGPT unavailable ({_exc_label(exc)}) — "
                 "composing everything from database.json",
                 level="warn",
             )
@@ -713,6 +713,1155 @@ async def _chat_session() -> AsyncIterator["ChatGPTConversation | None"]:
             yield conversation
         finally:
             await conversation.close()
+
+
+def _exc_label(exc: BaseException) -> str:
+    """Exception type plus its message, when it has one worth showing.
+
+    Every step's `except Exception as exc` handler used to log only
+    `type(exc).__name__` -- fine for a bare ChatGPTTimeoutError, but it
+    silently dropped the actual detail text on exceptions raised with a real
+    message (e.g. send_message()'s ChatGPTError explaining exactly what went
+    wrong), leaving the console panel saying only "(ChatGPTError)" with no
+    way to tell why short of re-reading the source.
+    """
+    detail = str(exc).strip()
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
+def _parse_json_reply(reply: str) -> dict[str, Any] | None:
+    """A reply that's supposed to be one JSON object (steps 1 and 2 of the
+    new pipeline architecture -- see DEFAULT_REQUIREMENTS_PROMPT and
+    DEFAULT_MATCHING_REQUIREMENTS_PROMPT), tolerant of a stray ```json code
+    fence or leading/trailing prose despite both prompts' own "no markdown"
+    instruction, the same way every other step in this pipeline never fully
+    trusts a model's format compliance. Returns None on anything that
+    isn't valid JSON, rather than raising -- a parse failure here should
+    degrade exactly like every later step's does, not crash the whole
+    extraction.
+    """
+    text = (reply or "").strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _extract_job_requirements(
+    chat: "ChatGPTConversation | None", job_description: str
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 1: parse the raw job description into
+    the structured requirements object DEFAULT_REQUIREMENTS_PROMPT asks
+    for -- skills, responsibilities, system types, leadership expectations,
+    business outcomes, ATS keywords, and a weighted matching-priority list,
+    for downstream semantic retrieval, resume generation, coverage
+    analysis, and job-match scoring to consume.
+
+    Runs as the first turn in the same chat every other step (eventually)
+    shares -- see extract_experience(), which currently stops right after
+    this step so its output can be verified before the rest of the new
+    architecture is built on top of it.
+
+    Returns None when chat is None, the call fails, or the reply doesn't
+    parse as JSON -- logged either way, never raised, matching every other
+    step's graceful-degradation rule.
+    """
+    if chat is None or not job_description.strip():
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("requirementsPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_REQUIREMENTS_PROMPT
+
+    message = settings_service.render_template(template, {"job_description": job_description})
+
+    progress.emit(
+        "requirements",
+        "Parsing the job description into a structured requirements object…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(message)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "requirements",
+            f"Requirements parsing failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_json_reply(reply)
+    if parsed is None:
+        progress.emit(
+            "requirements",
+            "ChatGPT's reply did not parse as JSON",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    progress.emit(
+        "requirements",
+        "Parsed the structured requirements object — "
+        f"{len(parsed.get('must_have_skills') or [])} must-have skills, "
+        f"{len(parsed.get('core_responsibilities') or [])} responsibilities, "
+        f"{len(parsed.get('matching_priority') or [])} matching-priority items",
+        level="result",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
+
+
+async def _extract_matching_requirements(
+    chat: "ChatGPTConversation | None",
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 2: converts step 1's structured
+    analysis -- already in this same chat -- into atomic matching
+    requirements for downstream semantic retrieval, coverage-gap detection,
+    synthetic experience generation, resume bullet planning, and job-match
+    scoring. See DEFAULT_MATCHING_REQUIREMENTS_PROMPT.
+
+    No job_description or other substitution: this prompt is a pure
+    follow-up, relying entirely on what step 1 already put in the
+    conversation (per its own "do not ask me to provide the previous
+    output again" instruction) -- sent as-is, the same way
+    _build_keyword_message is a bare follow-up in the revision chat.
+
+    Runs as the second turn in the same chat step 1 used -- see
+    extract_experience(), which currently stops right after this step so
+    its output can be verified before the rest of the new architecture is
+    built on top of it.
+
+    Returns None when chat is None, the call fails, or the reply doesn't
+    parse as JSON -- logged either way, never raised, matching every other
+    step's graceful-degradation rule.
+    """
+    if chat is None:
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("matchingRequirementsPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_MATCHING_REQUIREMENTS_PROMPT
+
+    progress.emit(
+        "matchreqs",
+        "Converting the analysis into atomic matching requirements…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(template)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "matchreqs",
+            f"Matching-requirements generation failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_json_reply(reply)
+    if parsed is None:
+        progress.emit(
+            "matchreqs",
+            "ChatGPT's reply did not parse as JSON",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    progress.emit(
+        "matchreqs",
+        "Parsed atomic matching requirements — "
+        f"{len(parsed.get('requirements') or [])} requirements, "
+        f"{len(parsed.get('coverage_groups') or [])} coverage groups, "
+        f"{len(parsed.get('critical_requirement_ids') or [])} critical",
+        level="result",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
+
+
+# New pipeline architecture, step 3 tuning -- see _retrieve_candidate_challenges.
+TOP_MATCHES_PER_REQUIREMENT = 5
+CANDIDATE_POOL_MAX = 25
+
+
+def _challenge_search_text(challenge: Challenge, project: Project) -> str:
+    """What step 3's retrieval embeds and searches for one challenge:
+    project description, challenge, action, achievement, business impact,
+    and seniority indicator -- a DIFFERENT field set than
+    Challenge.search_text() (which the old pipeline's _rank() uses): this
+    one adds project-level context and deliberately leaves out industry,
+    per the new architecture's step 3 spec.
+    """
+    parts = [
+        project.description,
+        challenge.challenge,
+        challenge.action,
+        challenge.achievement,
+        challenge.business_impact,
+        challenge.seniority_indicator,
+    ]
+    return " ".join(p for p in parts if p).strip()
+
+
+def _is_retrieval_eligible(requirement: dict[str, Any]) -> bool:
+    """requirement["retrieval_eligible"], tolerant of the model answering
+    with the string "false" instead of the JSON boolean despite the prompt
+    asking for one, and defaulting to True when the field is missing
+    entirely (an older reply from before this field existed, or one that
+    just dropped it) -- permissive on the "field wasn't there" case, strict
+    on an explicit false, matching this pipeline's usual rule of never
+    silently discarding everything over one missing piece.
+    """
+    value = requirement.get("retrieval_eligible", True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() != "false"
+    return True
+
+
+def _important_requirements(matching_requirements: dict[str, Any]) -> list[dict[str, Any]]:
+    """Requirements step 2 itself flagged as worth searching the corpus for.
+    high_priority_requirement_ids already IS "critical and highly important
+    requirements that should drive retrieval, generation, and final match
+    scoring" per step 2's own spec -- the list it built for exactly this
+    decision, not a threshold invented here. Also excludes anything step 2
+    marked retrieval_eligible=false (years-of-experience, degree, work
+    authorization, location, and similar eligibility/logistics requirements
+    that no experience challenge could ever demonstrate, however it's
+    worded) -- searching database.json for "5+ years of experience" was
+    never going to find anything meaningful.
+    """
+    important_ids = set(matching_requirements.get("high_priority_requirement_ids") or [])
+    return [
+        r
+        for r in (matching_requirements.get("requirements") or [])
+        if r.get("id") in important_ids
+        and r.get("semantic_search_query")
+        and _is_retrieval_eligible(r)
+    ]
+
+
+_Row = tuple[Challenge, Project, ProductEntry]
+
+
+def _technology_timeline_compatible(requirement: dict[str, Any], entry: ProductEntry) -> bool:
+    """False when the requirement names a specific technology with a known
+    earliest_plausible_year (step 2) that postdates this product's own
+    timeline -- the technology didn't exist yet when this role happened, so
+    a semantic match against one of its challenges isn't credible evidence
+    no matter how similar the wording reads. True whenever there's nothing
+    to check: no technology on the requirement, no year on it, or the
+    product's own timeline doesn't parse or is open-ended ("2019 -
+    Present") -- an unscoreable case degrades to "allowed" rather than
+    silently dropping a candidate over a parsing gap.
+    """
+    earliest = requirement.get("earliest_plausible_year")
+    if not earliest:
+        return True
+    _start, end = _timeline_years(entry.timeline)
+    if end is None:
+        return True
+    return end >= earliest
+
+
+def _score_requirements_against_rows(
+    important: list[dict[str, Any]], rows: Sequence[_Row]
+) -> dict[str, list[tuple[_Row, float]]]:
+    """Every row's similarity score against each important requirement's
+    semantic_search_query, descending -- excluding rows whose product's own
+    timeline predates the requirement's technology (see
+    _technology_timeline_compatible), a hard exclusion rather than a score
+    penalty: "this technology didn't exist yet at this job" isn't something
+    a strong semantic match should be able to override. Shared by Company
+    1's challenge-level retrieval (_retrieve_candidate_challenges) and
+    Company 2's company-level discovery (_discover_company2_candidates) --
+    both start from the same per-requirement embedding search over the same
+    kind of searchable text (see _challenge_search_text), just aggregate
+    the results differently.
+    """
+    documents = [_challenge_search_text(challenge, project) for challenge, project, _entry in rows]
+    scored: dict[str, list[tuple[_Row, float]]] = {}
+    for requirement in important:
+        scores = vector_search.score_documents(requirement["semantic_search_query"], documents)
+        ranked = sorted(zip(rows, scores), key=lambda pair: pair[1], reverse=True)
+        scored[requirement["id"]] = [
+            (row, score)
+            for row, score in ranked
+            if _technology_timeline_compatible(requirement, row[2])
+        ]
+    return scored
+
+
+def _select_company1_product(
+    matching_requirements: dict[str, Any], entries: Sequence[ProductEntry]
+) -> ProductEntry | None:
+    """Company 1's company name is fixed (Settings' firstCompany), but a
+    company can have more than one product in database.json -- and step 4
+    expects Company 1 to already be narrowed to ONE company/product pair
+    ("the Company 1 company/product selected in Step 3"), the same
+    granularity Company 2's shortlist already uses. Picks whichever of
+    Company 1's own products has the strongest evidence for the important
+    requirements: critical-requirement coverage ratio plus average
+    similarity, the same two signals _discover_company2_candidates leads
+    with -- deliberately NOT the industry/product/seniority/timeline
+    factors that function scores companies by, since those only make sense
+    while the company itself is still being chosen; here the company is
+    already fixed, only which of its products is still open.
+
+    Returns the sole entry directly when there's only one (the common
+    case), the single best-scoring one when there's a real choice to make,
+    and None when there are no entries at all.
+    """
+    if not entries:
+        return None
+    if len(entries) == 1:
+        return entries[0]
+
+    important = _important_requirements(matching_requirements)
+    rows = _flatten(entries)
+    if not important or not rows:
+        return entries[0]
+
+    critical_ids = set(matching_requirements.get("critical_requirement_ids") or [])
+    scored = _score_requirements_against_rows(important, rows)
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for requirement in important:
+        for (_challenge, _project, entry), score in scored[requirement["id"]][:TOP_MATCHES_PER_REQUIREMENT]:
+            bucket = buckets.setdefault(entry.product, {"entry": entry, "covered": {}})
+            bucket["covered"][requirement["id"]] = max(
+                bucket["covered"].get(requirement["id"], 0.0), float(score)
+            )
+    if not buckets:
+        return entries[0]
+
+    def product_score(bucket: dict[str, Any]) -> float:
+        covered = bucket["covered"]
+        critical_ratio = (len(critical_ids & covered.keys()) / len(critical_ids)) if critical_ids else 0.0
+        avg_similarity = sum(covered.values()) / len(covered) if covered else 0.0
+        return critical_ratio + avg_similarity
+
+    return max(buckets.values(), key=product_score)["entry"]
+
+
+def _retrieve_candidate_challenges(
+    matching_requirements: dict[str, Any], entries: Sequence[ProductEntry]
+) -> list[dict[str, Any]]:
+    """New pipeline architecture, step 3 (Company 1 half): pure Python +
+    sentence-transformers, no ChatGPT call. For each requirement step 2
+    flagged as important (see _important_requirements), vector-searches its
+    semantic_search_query against every challenge in `entries` -- normally
+    just Company 1's own corpus, since which company this runs is fixed --
+    broader than what the old pipeline's single, overall-mission query
+    searched against, and run once per requirement rather than once for the
+    whole job.
+
+    Keeps the top TOP_MATCHES_PER_REQUIREMENT per requirement, then
+    deduplicates by challenge (one challenge can satisfy several
+    requirements -- see the "matches" list on each result) and caps the
+    pool at CANDIDATE_POOL_MAX. Deliberately not narrowed to a final few
+    yet -- that's step 4's job, reranking these candidates in the same
+    ChatGPT session.
+
+    Returns a list of dicts, most-relevant first (by the best similarity
+    across all of a challenge's matched requirements):
+        {"challenge_id", "company", "product", "project", "text",
+         "matches": [{"requirement_id", "requirement", "similarity"}, ...]}
+    Empty when there's nothing important to search for, or nothing to
+    search against.
+    """
+    important = _important_requirements(matching_requirements)
+    rows = _flatten(entries)
+    if not important or not rows:
+        return []
+
+    scored = _score_requirements_against_rows(important, rows)
+
+    by_challenge_id: dict[str, dict[str, Any]] = {}
+    for requirement in important:
+        for (challenge, project, entry), score in scored[requirement["id"]][:TOP_MATCHES_PER_REQUIREMENT]:
+            candidate = by_challenge_id.setdefault(
+                challenge.id,
+                {
+                    "challenge_id": challenge.id,
+                    "company": entry.company,
+                    "product": entry.product,
+                    "project": project.name,
+                    "text": _challenge_search_text(challenge, project),
+                    "matches": [],
+                },
+            )
+            candidate["matches"].append(
+                {
+                    "requirement_id": requirement["id"],
+                    "requirement": requirement.get("requirement", ""),
+                    "similarity": round(float(score), 4),
+                }
+            )
+
+    candidates = list(by_challenge_id.values())
+    candidates.sort(key=lambda c: max(m["similarity"] for m in c["matches"]), reverse=True)
+    return candidates[:CANDIDATE_POOL_MAX]
+
+
+_TIMELINE_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+# Weights for _discover_company2_candidates' company_match_score -- sum to
+# 1.0. Critical-requirement coverage and raw similarity dominate (0.45
+# combined) since they're the most directly evidenced signals; timeline
+# compatibility is weighted deliberately higher than the other soft signals
+# since it was called out as its own rule, not just "nice to have".
+COMPANY2_WEIGHT_CRITICAL_COVERAGE = 0.25
+COMPANY2_WEIGHT_SIMILARITY = 0.20
+COMPANY2_WEIGHT_DIVERSITY = 0.10
+COMPANY2_WEIGHT_INDUSTRY = 0.10
+COMPANY2_WEIGHT_PRODUCT = 0.10
+COMPANY2_WEIGHT_SENIORITY = 0.10
+COMPANY2_WEIGHT_TIMELINE = 0.15
+COMPANY2_DIVERSITY_CAP = 5
+COMPANY2_CANDIDATE_MAX = 5
+
+
+def _timeline_years(timeline: str) -> tuple[int | None, int | None]:
+    """The (start, end) years parsed from a free-text timeline like
+    "2015 - 2019" -- tolerant of whatever separator sits between them
+    ("-", "to", an en/em dash, "Present"/"Current" for an open-ended end).
+    Only the first two 4-digit years found are used; (None, None) if none
+    parse at all, (start, None) if only one does.
+    """
+    years = [int(m.group(0)) for m in _TIMELINE_YEAR_RE.finditer(timeline or "")]
+    if not years:
+        return None, None
+    if len(years) == 1:
+        return years[0], None
+    return years[0], years[1]
+
+
+def _timeline_compatibility(candidate_start: int | None, first_company_end_year: int | None) -> float:
+    """1.0 when the candidate's start year is at or after Company 1's end
+    year -- chronologically sensible, since Company 1 is always the earlier
+    role in this app's model (see firstCompanyStartYear/EndYear's own doc
+    comment: "Job 1 runs start->end and Job 2 runs end->present"). Fades
+    linearly to 0 over the 3 years before that boundary, then stays 0.
+    Neutral (0.5, not a penalty) when either year is unparseable -- a
+    free-text timeline is often incomplete, and an unscoreable candidate
+    shouldn't be pushed to the bottom on that basis alone.
+    """
+    if candidate_start is None or first_company_end_year is None:
+        return 0.5
+    gap = candidate_start - first_company_end_year
+    if gap >= 0:
+        return 1.0
+    return max(0.0, 1.0 + gap / 3.0)
+
+
+def _discover_company2_candidates(
+    matching_requirements: dict[str, Any],
+    requirements: dict[str, Any] | None,
+    entries: Sequence[ProductEntry],
+    first_company_end_year: int | None,
+) -> list[dict[str, Any]]:
+    """New pipeline architecture, step 3 (Company 2 half): scores entire
+    companies/products against the JD, not individual challenges -- Company
+    2 should be whichever company's whole set of projects/challenges gives
+    the strongest overall JD coverage, not just whichever company happens
+    to contain the single highest-scoring challenge.
+
+    Starts from the same per-requirement embedding search as
+    _retrieve_candidate_challenges (_score_requirements_against_rows), but
+    groups each requirement's top matches by (company, product) -- the
+    ProductEntry granularity, matching how Job 2 is chosen -- instead of by
+    challenge. For each (company, product), combines:
+      - critical-requirement coverage ratio (of matching_requirements'
+        critical_requirement_ids);
+      - average/top similarity across the requirements it covers;
+      - diversity (how many distinct challenges contributed matches);
+      - industry relevance (embedding similarity between the job's
+        industry and the product's own industry field);
+      - product relevance (embedding similarity between the job's
+        mission/domain_keywords and the product's own name/summary);
+      - seniority suitability (embedding similarity between the job's
+        seniority level and the product's challenges' seniority_indicator
+        text);
+      - timeline compatibility (see _timeline_compatibility).
+    into one company_match_score, weighted by the COMPANY2_WEIGHT_*
+    constants above.
+
+    Returns the top COMPANY2_CANDIDATE_MAX (company, product) candidates,
+    highest score first:
+        {"company", "product", "timeline", "company_match_score",
+         "covered_requirements", "candidate_challenges"}
+    where candidate_challenges is the actual evidence -- the specific
+    database.json challenges that caused each covered requirement to count
+    as matched, same shape (and same challenges) _retrieve_candidate_
+    challenges returns for Company 1, so step 4 has real evidence to judge
+    for both companies, not just a list of requirement IDs with nothing
+    behind them:
+        {"challenge_id", "challenge", "action", "achievement",
+         "business_impact", "seniority_indicator",
+         "matches": [{"requirement_id", "similarity"}, ...]}
+    for step 4 (in the same ChatGPT session) to choose between -- not a
+    final pick made here. Empty when there's nothing important to search
+    for, or nothing to search against.
+    """
+    important = _important_requirements(matching_requirements)
+    rows = _flatten(entries)
+    if not important or not rows:
+        return []
+
+    critical_ids = set(matching_requirements.get("critical_requirement_ids") or [])
+    scored = _score_requirements_against_rows(important, rows)
+
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    for requirement in important:
+        for (challenge, project, entry), score in scored[requirement["id"]][:TOP_MATCHES_PER_REQUIREMENT]:
+            key = (entry.company, entry.product)
+            bucket = buckets.setdefault(
+                key,
+                {"entry": entry, "covered": {}, "challenges": {}},
+            )
+            bucket["covered"][requirement["id"]] = max(
+                bucket["covered"].get(requirement["id"], 0.0), float(score)
+            )
+            challenge_bucket = bucket["challenges"].setdefault(
+                challenge.id, {"challenge": challenge, "matches": []}
+            )
+            challenge_bucket["matches"].append(
+                {"requirement_id": requirement["id"], "similarity": round(float(score), 4)}
+            )
+    if not buckets:
+        return []
+
+    requirements = requirements or {}
+    job_industry = requirements.get("industry", "")
+    job_seniority = requirements.get("seniority", "")
+    job_context = " ".join(
+        p for p in (requirements.get("mission", ""), ", ".join(requirements.get("domain_keywords") or [])) if p
+    )
+    seniority_query = f"{job_seniority} level experience" if job_seniority else ""
+
+    candidates: list[dict[str, Any]] = []
+    for (company, product), bucket in buckets.items():
+        entry: ProductEntry = bucket["entry"]
+        covered: dict[str, float] = bucket["covered"]
+
+        critical_covered = critical_ids & covered.keys()
+        critical_ratio = (len(critical_covered) / len(critical_ids)) if critical_ids else 0.0
+        similarity_component = (
+            (sum(covered.values()) / len(covered)) + max(covered.values())
+        ) / 2 if covered else 0.0
+        diversity = min(1.0, len(bucket["challenges"]) / COMPANY2_DIVERSITY_CAP)
+
+        industry_score = 0.5
+        if job_industry and entry.industry:
+            industry_score = float(vector_search.score_documents(job_industry, [entry.industry])[0])
+
+        product_text = " ".join(p for p in (entry.product, entry.summary) if p)
+        product_score = 0.5
+        if job_context and product_text:
+            product_score = float(vector_search.score_documents(job_context, [product_text])[0])
+
+        seniority_score = 0.5
+        seniority_texts = [
+            c.seniority_indicator
+            for c, _p, e in rows
+            if e is entry and c.seniority_indicator
+        ]
+        if seniority_query and seniority_texts:
+            seniority_score = float(
+                vector_search.score_documents(seniority_query, [" ".join(seniority_texts)])[0]
+            )
+
+        start_year, _end_year = _timeline_years(entry.timeline)
+        timeline_score = _timeline_compatibility(start_year, first_company_end_year)
+
+        company_match_score = (
+            COMPANY2_WEIGHT_CRITICAL_COVERAGE * critical_ratio
+            + COMPANY2_WEIGHT_SIMILARITY * similarity_component
+            + COMPANY2_WEIGHT_DIVERSITY * diversity
+            + COMPANY2_WEIGHT_INDUSTRY * industry_score
+            + COMPANY2_WEIGHT_PRODUCT * product_score
+            + COMPANY2_WEIGHT_SENIORITY * seniority_score
+            + COMPANY2_WEIGHT_TIMELINE * timeline_score
+        )
+
+        candidate_challenges = [
+            {
+                "challenge_id": challenge_id,
+                "challenge": cb["challenge"].challenge,
+                "action": cb["challenge"].action,
+                "achievement": cb["challenge"].achievement,
+                "business_impact": cb["challenge"].business_impact,
+                "seniority_indicator": cb["challenge"].seniority_indicator,
+                "matches": cb["matches"],
+            }
+            for challenge_id, cb in bucket["challenges"].items()
+        ]
+        candidate_challenges.sort(
+            key=lambda c: max(m["similarity"] for m in c["matches"]), reverse=True
+        )
+
+        candidates.append(
+            {
+                "company": company,
+                "product": product,
+                "timeline": entry.timeline,
+                "company_match_score": round(company_match_score, 4),
+                "covered_requirements": sorted(covered.keys()),
+                "candidate_challenges": candidate_challenges,
+            }
+        )
+
+    candidates.sort(key=lambda c: c["company_match_score"], reverse=True)
+    return candidates[:COMPANY2_CANDIDATE_MAX]
+
+
+def _build_selection_message(
+    company1: ProductEntry | None,
+    company1_candidates: list[dict[str, Any]],
+    company2_candidates: list[dict[str, Any]],
+    selection_prompt: str,
+) -> str:
+    """Step 4's message: unlike step 2 (a pure conversation follow-up),
+    step 3's own output was never sent to ChatGPT at all -- it's pure
+    Python/sentence-transformers, computed entirely outside the chat -- so
+    despite this prompt's own "use the outputs already generated in this
+    session" framing, that data has to be included here explicitly or
+    there is nothing for the model to select from. Company 1's own
+    company/product/timeline is included too (see _select_company1_product)
+    since step 3's candidate list alone doesn't carry it. Content first,
+    then the user's own step 4 prompt exactly as written -- same shape as
+    _build_revision_message.
+    """
+    company1_header = (
+        {"company": company1.company, "product": company1.product, "timeline": company1.timeline}
+        if company1 is not None
+        else None
+    )
+    # Compact, not indent=2: this JSON has to be typed into the browser's
+    # composer (see SEND_ACTION_TIMEOUT_MS in chatgpt.py), and pretty-
+    # printing roughly doubles a deeply nested payload's size for
+    # whitespace that only helps a human reader -- the model doesn't need
+    # it, and the console preview (see _select_grounding_plan) stays
+    # indented separately for that.
+    def dump(obj: Any) -> str:
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+    return (
+        "Here is Step 3's output for this job.\n\n"
+        f"Company 1 (fixed): {dump(company1_header)}\n\n"
+        "Company 1 candidate challenges:\n"
+        f"{dump(company1_candidates)}\n\n"
+        "Company 2 shortlist (candidate companies/products):\n"
+        f"{dump(company2_candidates)}\n\n"
+        "---\n\n"
+        f"{selection_prompt}"
+    )
+
+
+async def _select_grounding_plan(
+    chat: "ChatGPTConversation | None",
+    company1: ProductEntry | None,
+    company1_candidates: list[dict[str, Any]],
+    company2_candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 4: choose exactly one Company 2 from
+    step 3's shortlist, select which retrieved challenges from each company
+    actually ground the resume, and classify per-requirement coverage
+    (strong/partial/uncovered) plus gap-detection for a later generation
+    step -- see DEFAULT_SELECTION_PROMPT. Runs as a further turn in the
+    same chat steps 1-3 used.
+
+    Returns None when chat is None, there's nothing to select from (both
+    candidate lists empty), the call fails, or the reply doesn't parse as
+    JSON -- logged either way, never raised, matching every other step's
+    graceful-degradation rule.
+    """
+    if chat is None or (not company1_candidates and not company2_candidates):
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("selectionPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_SELECTION_PROMPT
+
+    message = _build_selection_message(company1, company1_candidates, company2_candidates, template)
+
+    progress.emit(
+        "selection",
+        "Selecting Company 2 and building the coverage/gap plan…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(message)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "selection",
+            f"Selection/coverage planning failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_json_reply(reply)
+    if parsed is None:
+        progress.emit(
+            "selection",
+            "ChatGPT's reply did not parse as JSON",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    company2_picked = parsed.get("company_2") or {}
+    progress.emit(
+        "selection",
+        "Selected Company 2 and built the coverage plan — "
+        f"Company 2: {company2_picked.get('company', '?')} "
+        f"({company2_picked.get('product', '?')}), "
+        f"{len(parsed.get('combined_coverage') or [])} requirements classified, "
+        f"{len(parsed.get('remaining_gaps') or [])} gaps, "
+        f"{len(parsed.get('generation_targets') or [])} generation targets",
+        level="result",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
+
+
+async def _generate_synthetic_experience(
+    chat: "ChatGPTConversation | None",
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 5: generates structured synthetic
+    experience only for the gaps/generation_targets step 4's own reply
+    identified -- see DEFAULT_SYNTHETIC_GENERATION_PROMPT.
+
+    No job_description or other substitution, and no data re-injected: a
+    pure conversation follow-up, sent as-is, the same way step 2
+    (_extract_matching_requirements) and _build_keyword_message are.
+    Unlike step 3 (pure Python, never sent to ChatGPT), step 4 ran IN this
+    chat, so its JSON grounding plan -- and the retrieved challenges it was
+    built from, which step 4's own message included -- is already in the
+    model's own context; nothing further needs to be pasted back in.
+
+    Returns None when chat is None, the call fails, or the reply doesn't
+    parse as JSON -- logged either way, never raised, matching every other
+    step's graceful-degradation rule.
+    """
+    if chat is None:
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("syntheticGenerationPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_SYNTHETIC_GENERATION_PROMPT
+
+    progress.emit(
+        "synthesis",
+        "Generating synthetic experience for the remaining coverage gaps…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(template)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "synthesis",
+            f"Synthetic experience generation failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_json_reply(reply)
+    if parsed is None:
+        progress.emit(
+            "synthesis",
+            "ChatGPT's reply did not parse as JSON",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    company1_generated = len((parsed.get("company_1") or {}).get("generated_experience") or [])
+    company2_generated = len((parsed.get("company_2") or {}).get("generated_experience") or [])
+    progress.emit(
+        "synthesis",
+        f"Generated {company1_generated} synthetic challenge(s) for Company 1, "
+        f"{company2_generated} for Company 2 — "
+        f"{len(parsed.get('remaining_uncovered_requirements') or [])} requirements still uncovered",
+        level="result",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
+
+
+async def _generate_resume_bullets(
+    chat: "ChatGPTConversation | None",
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 6: writes the final resume bullets
+    (6 for Company 1, 8 for Company 2) from the retrieved and synthetic
+    experience already established -- see DEFAULT_BULLETS_PROMPT.
+
+    No job_description or other substitution, and no data re-injected: a
+    pure conversation follow-up, same as step 5 right before it -- steps 4
+    and 5 both ran in this chat, so the grounding plan, retrieved
+    challenges, and synthetic experience it needs are already in the
+    model's own context.
+
+    Returns None when chat is None, the call fails, or the reply doesn't
+    parse as JSON -- logged either way, never raised, matching every other
+    step's graceful-degradation rule.
+    """
+    if chat is None:
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("bulletsPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_BULLETS_PROMPT
+
+    progress.emit(
+        "bullets",
+        "Writing the final resume bullets for both companies…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(template)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "bullets",
+            f"Bullet generation failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_json_reply(reply)
+    if parsed is None:
+        progress.emit(
+            "bullets",
+            "ChatGPT's reply did not parse as JSON",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    company1_bullets = len((parsed.get("company_1") or {}).get("bullets") or [])
+    company2_bullets = len((parsed.get("company_2") or {}).get("bullets") or [])
+    progress.emit(
+        "bullets",
+        f"Wrote {company1_bullets} bullet(s) for Company 1, "
+        f"{company2_bullets} for Company 2",
+        level="result",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
+
+
+async def _generate_resume_content(
+    chat: "ChatGPTConversation | None",
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 7: writes the remaining resume
+    content -- overall title, summary, skill set, each company's own title
+    and company summary -- around step 6's now-final bullets, which this
+    step must copy back unchanged. See DEFAULT_RESUME_CONTENT_PROMPT.
+
+    No job_description or other substitution, and no data re-injected: a
+    pure conversation follow-up, same as step 6 right before it -- steps 4,
+    5 and 6 all ran in this chat, so everything this step needs (coverage,
+    both companies' established role levels, and the final bullets) is
+    already in the model's own context.
+
+    Returns None when chat is None, the call fails, or the reply doesn't
+    parse as JSON -- logged either way, never raised, matching every other
+    step's graceful-degradation rule.
+    """
+    if chat is None:
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("resumeContentPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_RESUME_CONTENT_PROMPT
+
+    progress.emit(
+        "content",
+        "Writing the resume title, summary, skills, and company summaries…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(template)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "content",
+            f"Resume content generation failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_json_reply(reply)
+    if parsed is None:
+        progress.emit(
+            "content",
+            "ChatGPT's reply did not parse as JSON",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    experience = parsed.get("experience") or []
+    titles = ", ".join(f"{e.get('company', '?')}: {e.get('title', '?')}" for e in experience)
+    progress.emit(
+        "content",
+        f"Wrote resume title {parsed.get('resume_title', '?')!r}, "
+        f"{len(parsed.get('skill_set') or [])} skill categories, "
+        f"role titles — {titles or 'none'}",
+        level="result",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
+
+
+# Strips a <b>...</b> wrapper -- whether it landed as a real nested element
+# under <name> (the requested shape) or, if a reply still double-escaped
+# it, as literal "<b>...</b>" text -- back off a category name before this
+# app's own resume renderer sees it. The frontend already wraps every skill
+# category in its own <strong> (blocks.tsx), so the tag has no use past
+# this parse; keeping it would show literal "<b>Category</b>" as visible
+# text in the generated PDF instead of bolding it.
+_BOLD_TAG_RE = re.compile(r"</?b>", re.IGNORECASE)
+
+
+def _category_name(category_el: "ET.Element") -> str:
+    """A <category>'s display name, from its <name> child (falling back to
+    a bare `name="..."` attribute for a reply that still uses the older
+    shape) -- see _BOLD_TAG_RE above for why any <b> wrapper is stripped.
+    """
+    name_el = category_el.find("name")
+    text = "".join(name_el.itertext()) if name_el is not None else (category_el.get("name") or "")
+    return _BOLD_TAG_RE.sub("", text).strip()
+
+
+def _category_skills(category_el: "ET.Element") -> list[str]:
+    """A <category>'s skill list, from its <skills> child (falling back to
+    the category element's own text for a reply that still uses the older
+    shape, where the skills were the category's direct text content).
+    """
+    skills_el = category_el.find("skills")
+    text = skills_el.text if skills_el is not None else category_el.text
+    return [s.strip() for s in (text or "").split(",") if s.strip()]
+
+
+def _parse_final_resume_xml(reply: str) -> dict[str, Any] | None:
+    """Parse step 8's <resume>...</resume> XML reply into the same shape
+    step 7 returned (resume_title/summary/skill_set/experience), now with
+    [keyword] markers folded into the text.
+
+    Reuses _XML_BLOCK_RE below -- the general <resume>...</resume> shape
+    other steps already produce -- but read here as an ordered list rather
+    than matched by company name: step 7's own JSON was already
+    company_1-then-company_2 in order, and step 8 is asked only to add
+    brackets around that same content, so the model's two <company>
+    elements stay in that order too.
+
+    Returns None on any parse failure -- no XML block found, malformed XML,
+    or no <company> elements at all -- so the caller can log the raw reply
+    and degrade gracefully like every other step.
+    """
+    match = _XML_BLOCK_RE.search(reply or "")
+    if not match:
+        return None
+    try:
+        root = ET.fromstring(_BARE_AMPERSAND_RE.sub("&amp;", match.group(0)))
+    except ET.ParseError:
+        return None
+
+    skill_set: list[dict[str, Any]] = []
+    skill_set_el = root.find("skill_set")
+    if skill_set_el is not None:
+        for category_el in skill_set_el.findall("category"):
+            name = _category_name(category_el)
+            if name:
+                skill_set.append({"category": name, "skills": _category_skills(category_el)})
+
+    experience: list[dict[str, Any]] = []
+    experience_el = root.find("experience")
+    if experience_el is not None:
+        for company_el in experience_el.findall("company"):
+            achievements = company_el.find("achievements")
+            bullets = (
+                [_xml_text(b) for b in achievements.findall("bullet") if _xml_text(b)]
+                if achievements is not None
+                else []
+            )
+            experience.append(
+                {
+                    "company": (company_el.get("name") or "").strip(),
+                    "product": _xml_text(company_el.find("product")),
+                    "timeline": _xml_text(company_el.find("timeline")),
+                    "title": _xml_text(company_el.find("title")),
+                    "company_summary": _xml_text(company_el.find("company_summary")),
+                    "bullets": bullets,
+                }
+            )
+
+    if not experience:
+        return None
+
+    return {
+        "resume_title": _xml_text(root.find("resume_title")),
+        "summary": _xml_text(root.find("summary")),
+        "skill_set": skill_set,
+        "experience": experience,
+    }
+
+
+async def _generate_final_resume(
+    chat: "ChatGPTConversation | None",
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 8: a format-only pass over step 7's
+    resume content -- wraps selective, already-existing words in [keyword]
+    markers, bolds each skill category's name, and returns the whole thing
+    as the <resume> XML structure the rest of the app expects. See
+    DEFAULT_FINAL_RESUME_PROMPT.
+
+    No job_description or other substitution, and no data re-injected: a
+    pure conversation follow-up, same as step 7 right before it -- step 7
+    ran in this chat, so the finalized content it must preserve verbatim
+    (only adding bracket markers) is already in the model's own context.
+
+    Returns None when chat is None, the call fails, or the reply's XML
+    doesn't parse (see _parse_final_resume_xml) -- logged either way, never
+    raised, matching every other step's graceful-degradation rule.
+    """
+    if chat is None:
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("finalResumePrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_FINAL_RESUME_PROMPT
+
+    progress.emit(
+        "format",
+        "Marking keywords and formatting the final resume…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(template)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "format",
+            f"Final resume formatting failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_final_resume_xml(reply)
+    if parsed is None:
+        progress.emit(
+            "format",
+            "ChatGPT's reply did not parse as the expected <resume> XML",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    bullet_counts = ", ".join(
+        f"{e.get('company', '?')}: {len(e.get('bullets') or [])}"
+        for e in (parsed.get("experience") or [])
+    )
+    progress.emit(
+        "format",
+        f"Formatted the final resume — bullets per company: {bullet_counts or 'none'}",
+        level="result",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
+
+
+async def _validate_final_resume(
+    chat: "ChatGPTConversation | None",
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 9: a validation-only pass over step
+    8's <resume> XML -- checks XML validity, Step 7->8 content preservation,
+    bullet counts, metric preservation, skills, keyword-marker limits, JD
+    coverage, and a final job-match score, without rewriting anything. See
+    DEFAULT_VALIDATION_PROMPT.
+
+    No job_description or other substitution, and no data re-injected: a
+    pure conversation follow-up, same as step 8 right before it -- every
+    prior step ran in this chat, so everything this step checks against is
+    already in the model's own context.
+
+    Returns None when chat is None, the call fails, or the reply doesn't
+    parse as JSON -- logged either way, never raised, matching every other
+    step's graceful-degradation rule.
+    """
+    if chat is None:
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("validationPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_VALIDATION_PROMPT
+
+    progress.emit(
+        "validation",
+        "Validating the final resume before backend handoff…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(template)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "validation",
+            f"Final validation failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_json_reply(reply)
+    if parsed is None:
+        progress.emit(
+            "validation",
+            "ChatGPT's reply did not parse as JSON",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    blocking = parsed.get("blocking_issues") or []
+    warnings = parsed.get("warnings") or []
+    progress.emit(
+        "validation",
+        f"Validated — backend_ready={parsed.get('backend_ready')}, "
+        f"match score {parsed.get('job_match_score', '?')}/100, "
+        f"{len(blocking)} blocking issue(s), {len(warnings)} warning(s)",
+        level="result" if not blocking else "warn",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
 
 
 _EXTRACTION_XML_RE = re.compile(r"<extraction\b.*?</extraction\s*>", re.IGNORECASE | re.DOTALL)
@@ -791,7 +1940,7 @@ async def _extract_job_fields(
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
             "skills",
-            f"Skill extraction unavailable ({type(exc).__name__}) — "
+            f"Skill extraction unavailable ({_exc_label(exc)}) — "
             "ranking on the description text alone",
             level="warn",
         )
@@ -899,7 +2048,7 @@ async def _generate_summary(
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
             "summary",
-            f"Summary generation failed ({type(exc).__name__}) — "
+            f"Summary generation failed ({_exc_label(exc)}) — "
             "keeping the profile's own summary",
             level="warn",
         )
@@ -973,7 +2122,7 @@ async def _generate_company_summary(
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
             "companySummary",
-            f"Company summary generation failed ({type(exc).__name__}) — "
+            f"Company summary generation failed ({_exc_label(exc)}) — "
             "keeping the existing company summary",
             level="warn",
         )
@@ -1121,7 +2270,7 @@ async def _draft_titles(
         return reply
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
-            "title", f"Title drafting failed ({type(exc).__name__}) — no title draft", level="warn"
+            "title", f"Title drafting failed ({_exc_label(exc)}) — no title draft", level="warn"
         )
         return ""
 
@@ -1213,7 +2362,7 @@ async def _generate_skill_set(
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
             "skillSet",
-            f"Skill set generation failed ({type(exc).__name__}) — "
+            f"Skill set generation failed ({_exc_label(exc)}) — "
             "keeping the profile's own skills",
             level="warn",
         )
@@ -1317,7 +2466,7 @@ async def _generate_whole_resume(
     except Exception as exc:  # noqa: BLE001 - provider unavailable
         progress.emit(
             "assemble",
-            f"Resume assembly failed ({type(exc).__name__}) — assembling "
+            f"Resume assembly failed ({_exc_label(exc)}) — assembling "
             "the resume from the pieces already written instead",
             level="warn",
         )
@@ -1898,7 +3047,7 @@ async def _revise_with_chatgpt(
     except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
         progress.emit(
             "revision",
-            f"ChatGPT revision failed ({type(exc).__name__}) — keeping "
+            f"ChatGPT revision failed ({_exc_label(exc)}) — keeping "
             "the pre-revision version",
             level="warn",
         )
@@ -1939,152 +3088,189 @@ async def extract_experience(
     # context. `chat` is None when ChatGPT is unreachable, and every step
     # falls back on its own rather than failing the extraction.
     async with _chat_session() as chat:
-        # Step 1: derive skills, mission, and industry from the job
-        # description when the caller hasn't supplied skills. This used to
-        # be a separate button in the Jobs table; folding it in keeps the
-        # pipeline traceable in one place.
-        if tech_skills:
-            fields: dict[str, str] = {"skills": ", ".join(tech_skills)}
-            if job_mission:
-                fields["mission"] = job_mission
-        elif job_description.strip():
-            fields = await _extract_job_fields(chat, job_description, job_mission or "")
-        else:
-            fields = {"mission": job_mission} if job_mission else {}
-        if not fields.get("mission"):
-            fields["mission"] = job_description
+        # New pipeline architecture, steps 1-9: parse the job description
+        # into a structured requirements object, convert that (still in the
+        # same chat) into atomic matching requirements, retrieve candidates
+        # via vector search -- Company 1's own challenges (fixed, known
+        # company, narrowed to its single best product) plus a scored
+        # shortlist of Company 2 candidate companies/products (the company
+        # whose challenges give the strongest OVERALL JD coverage, not just
+        # whichever company happens to contain the single highest-scoring
+        # challenge) -- then hand both back into this same chat for ChatGPT
+        # to choose Company 2, select grounding challenges, classify
+        # coverage/gaps, generate synthetic experience for whatever gaps
+        # remain, write the final bullets, write the remaining resume
+        # content around them, and format it all into the final <resume>
+        # XML (step 9, validation, is skipped for now -- see the note further
+        # down). See _extract_job_requirements/_extract_matching_requirements/
+        # _select_company1_product/_retrieve_candidate_challenges/
+        # _discover_company2_candidates/_select_grounding_plan/
+        # _generate_synthetic_experience/_generate_resume_bullets/
+        # _generate_resume_content/_generate_final_resume and this module's
+        # DEFAULT_*_PROMPT constants. All output is logged to the console
+        # (preview=). The old pipeline's own steps 1-9 further down in this
+        # file are unreachable from here -- this function returns before
+        # ever falling through to them.
+        requirements = await _extract_job_requirements(chat, job_description)
+        matching_requirements = await _extract_matching_requirements(chat)
 
-        skills = [s.strip() for s in fields.get("skills", "").split(",") if s.strip()]
-        industry = fields.get("industry", "")
+        # Step 3: pure Python + sentence-transformers, no ChatGPT call. Off
+        # the event loop, same reason _select_job1/_select_job2 already
+        # are: this calls sentence-transformers, which is CPU-bound.
+        candidates: list[dict[str, Any]] = []
+        company2_candidates: list[dict[str, Any]] = []
+        company1_entry: ProductEntry | None = None
+        if matching_requirements:
+            from app.services import settings_service
 
-        from app.services import settings_service
+            canonical_company = db.find_company(first_company)
+            if canonical_company is None:
+                progress.emit(
+                    "retrieval",
+                    f"{first_company!r} is not a company in this profile's "
+                    "database.json — skipping Company 1 candidate retrieval",
+                    level="warn",
+                )
+            else:
+                # A company can have more than one product in database.json;
+                # step 4 expects Company 1 already narrowed to one, the same
+                # granularity Company 2's shortlist uses -- see
+                # _select_company1_product.
+                company1_entry = await asyncio.to_thread(
+                    _select_company1_product,
+                    matching_requirements,
+                    db.entries_for_company(canonical_company),
+                )
+                if company1_entry is not None:
+                    candidates = await asyncio.to_thread(
+                        _retrieve_candidate_challenges, matching_requirements, [company1_entry]
+                    )
+                    progress.emit(
+                        "retrieval",
+                        f"Company 1 ({company1_entry.company} / "
+                        f"{company1_entry.product}): retrieved {len(candidates)} "
+                        "candidate challenges for "
+                        f"{len(_important_requirements(matching_requirements))} "
+                        "important requirements",
+                        level="result",
+                        preview=json.dumps(candidates, indent=2, ensure_ascii=False),
+                    )
 
-        try:
-            industry_weight = float(settings_service.get_settings().get("industryWeight") or "")
-        except (TypeError, ValueError):
-            industry_weight = INDUSTRY_SIMILARITY_WEIGHT
+            # Company 1's end year anchors Company 2's timeline-compatibility
+            # score -- see _timeline_compatibility. Not required: an
+            # unparseable or unset year just makes that one factor neutral.
+            try:
+                first_company_end_year = int(
+                    settings_service.get_settings().get("firstCompanyEndYear") or ""
+                )
+            except ValueError:
+                first_company_end_year = None
 
-        query = vector_search.build_query(fields, job_title)
-        progress.emit(
-            "query",
-            "Built hybrid search query",
-            level="step",
-            skills=skills,
-            query=query,
-        )
-
-        # Off the event loop. Ranking calls sentence-transformers, which is
-        # CPU-bound and loads a ~90MB model on first use — measured at 30s.
-        # Run inline it froze the whole server for that long: every request,
-        # including /health, waits behind it because nothing else can be
-        # served while the loop is executing Python. `industry` blends an
-        # industry-specific similarity into each selection's ranking, by
-        # `industry_weight` -- the profile's own "Industry weight" slider on
-        # the Profile page (falls back to INDUSTRY_SIMILARITY_WEIGHT when
-        # nothing is stored yet).
-        job1_sel, job1_picked = await asyncio.to_thread(
-            _select_job1, db, first_company, query, industry, industry_weight
-        )
-        job2_sel, job2_picked = await asyncio.to_thread(
-            _select_job2, db, first_company, query, industry, industry_weight
-        )
-
-        # Step 2: both companies' challenges, introduced together before
-        # either one's bullets are asked for -- see _announce_companies.
-        await _announce_companies(chat, job1_sel, job1_picked, job2_sel, job2_picked)
-
-        # Step 3: each company's own bullets and section summary.
-        job1_sel.bullets, gen1 = await _generate_bullets(
-            chat, job1_picked, job1_sel, job_description, JOB1_BULLET_COUNT, "job1"
-        )
-        job1_sel.company_summary, _ = await _generate_company_summary(
-            chat, job1_sel, job_description, job_title
-        )
-        job2_sel.bullets, gen2 = await _generate_bullets(
-            chat, job2_picked, job2_sel, job_description, JOB2_BULLET_COUNT, "job2"
-        )
-        job2_sel.company_summary, _ = await _generate_company_summary(
-            chat, job2_sel, job_description, job_title
-        )
-
-        # Step 4: the summary is written from the bullets that now exist.
-        summary, summary_source = await _generate_summary(
-            chat, job1_sel, job2_sel, job_description, job_title
-        )
-
-        # Step 5: a first draft of the headlines -- resume-wide and each
-        # company's own, together in one turn (see _draft_titles) -- once
-        # the summary is settled. Not parsed here; folded into what step 8
-        # sends ChatGPT below, which is what actually finalizes them.
-        titles_draft = await _draft_titles(
-            chat, job1_sel, job2_sel, summary, current_title, job_description, job_title
-        )
-
-        # Step 6: the skill set, written in this chat, before it's all
-        # assembled (step 7) and revised (steps 8-9) later in the same chat.
-        skill_set, skill_set_source = await _generate_skill_set(
-            chat, job1_sel, job2_sel, job_description, job_title
-        )
-
-        # Step 7: ChatGPT assembles everything above into the complete
-        # resume, still in this chat, before steps 8-9 revise it.
-        whole_resume, whole_resume_source = await _generate_whole_resume(
-            chat, job1_sel, job2_sel, summary, skill_set
-        )
-
-        # Falls back to the same content built programmatically when step 7
-        # didn't produce something usable -- see _generate_whole_resume. The
-        # title draft rides along as its own section regardless of which path
-        # produced the rest -- see _draft_titles for why it's sent unparsed.
-        resume_content = whole_resume or _assemble_resume_content(
-            job1_sel.bullets, job2_sel.bullets, job1_sel.company_summary,
-            job2_sel.company_summary, summary, skill_set,
-        )
-        if titles_draft:
-            resume_content += (
-                "\n\nDraft Titles (finalize these -- overall resume title "
-                f"first, then each company's own):\n{titles_draft}"
+            company2_candidates = await asyncio.to_thread(
+                _discover_company2_candidates,
+                matching_requirements,
+                requirements,
+                db.entries_excluding(canonical_company),
+                first_company_end_year,
+            )
+            progress.emit(
+                "retrieval",
+                f"Company 2 discovery: shortlisted {len(company2_candidates)} "
+                "candidate companies/products for ChatGPT to choose between",
+                level="result",
+                preview=json.dumps(company2_candidates, indent=2, ensure_ascii=False),
             )
 
-        # Steps 8-9, still in this same chat -- the whole job's work happens
-        # in one ChatGPT session, not a first chat handed off to a second.
-        (
-            job1_sel.bullets,
-            job2_sel.bullets,
-            job1_sel.company_summary,
-            job2_sel.company_summary,
-            summary,
-            skill_groups,
-            generated_title,
-            job1_sel.title,
-            job2_sel.title,
-            revised,
-        ) = await _revise_with_chatgpt(
-            chat,
-            resume_content,
-            job1_sel.bullets,
-            job2_sel.bullets,
-            job1_sel.company_summary,
-            job2_sel.company_summary,
-            summary,
-            skill_set,
-            job1_sel.company,
-            job2_sel.company,
+        # Step 4: choose Company 2 from the shortlist, select grounding
+        # challenges, classify coverage, and detect gaps -- still in this
+        # same chat. See _select_grounding_plan.
+        grounding_plan = await _select_grounding_plan(
+            chat, company1_entry, candidates, company2_candidates
         )
 
-        # After steps 8-9 too, so this reflects every turn in the session,
-        # not just steps 1-7.
+        # Step 5: fill step 4's own gaps/generation_targets with synthetic
+        # experience -- still in this same chat. Only worth asking when
+        # step 4 actually produced something to fill gaps IN -- nothing
+        # sensible to generate against a turn that never happened.
+        synthesis = (
+            await _generate_synthetic_experience(chat) if grounding_plan is not None else None
+        )
+
+        # Step 6: write the final resume bullets -- still in this same chat.
+        # Same gate as step 5: only worth asking once step 4 has actually
+        # produced a grounding plan to write bullets from.
+        bullets = (
+            await _generate_resume_bullets(chat) if grounding_plan is not None else None
+        )
+
+        # Step 7: write the remaining resume content around step 6's now-
+        # final bullets -- still in this same chat. Only worth asking once
+        # step 6 has actually produced bullets to build around.
+        resume_content = (
+            await _generate_resume_content(chat) if bullets is not None else None
+        )
+
+        # Step 8: format-only pass -- keyword marking and the final <resume>
+        # XML -- still in this same chat. Only worth asking once step 7 has
+        # actually produced the content to format.
+        final_resume = (
+            await _generate_final_resume(chat) if resume_content is not None else None
+        )
+
+        # Step 9 (validation) is skipped for now: go straight from step 8's
+        # XML to the resume this function returns, rather than stopping
+        # short of it like every step above did. Re-enable with
+        # `await _validate_final_resume(chat)` here, right after step 8,
+        # once something downstream is ready to act on backend_ready/
+        # blocking_issues rather than just logging them to the console.
+        if final_resume is None:
+            raise ExperienceExtractionError(
+                "Extraction did not produce a final resume -- see the "
+                "console panel for the step where it stopped."
+            )
+
         turns = chat.turns if chat else 0
 
-    title_source = "chatgpt" if generated_title else "none"
+    # New pipeline architecture's own final assembly: step 8's XML, already
+    # parsed into resume_title/summary/skill_set/experience by
+    # _parse_final_resume_xml, is reshaped into the same payload the old
+    # pipeline used to build from its own steps 1-9 -- job1/job2 as
+    # JobSelection.__dict__, skillSet/skillGroups, etc. -- so _store_run and
+    # everything downstream (tailored_resume_service.py, the Jobs page) keep
+    # working unchanged. The old pipeline's own code below this function is
+    # now unreachable from here, same as it's been all session.
+    experience_entries = final_resume.get("experience") or []
+    job1_data = experience_entries[0] if len(experience_entries) > 0 else {}
+    job2_data = experience_entries[1] if len(experience_entries) > 1 else {}
+
+    def _job_selection(entry: dict[str, Any]) -> JobSelection:
+        return JobSelection(
+            company=str(entry.get("company") or ""),
+            product=str(entry.get("product") or ""),
+            timeline=str(entry.get("timeline") or ""),
+            company_summary=str(entry.get("company_summary") or ""),
+            title=str(entry.get("title") or ""),
+            bullets=[b for b in (entry.get("bullets") or []) if b],
+        )
+
+    job1_sel = _job_selection(job1_data)
+    job2_sel = _job_selection(job2_data)
+
+    # _parse_final_resume_xml already strips <b> markup from the category
+    # name (this app's own renderer bolds it independently -- see
+    # _category_name's docstring), so this is already plain text.
+    skill_groups_final = [
+        (str(sg.get("category") or "").strip(), list(sg.get("skills") or []))
+        for sg in (final_resume.get("skill_set") or [])
+        if sg.get("category")
+    ]
+    skill_set_flat = [s for _, skills in skill_groups_final for s in skills]
 
     progress.emit(
         "done",
         f"Finished: {len(job1_sel.bullets)} + {len(job2_sel.bullets)} bullets "
         f"({job1_sel.company} → {job2_sel.company})"
-        + (f", summary, {turns} ChatGPT turns in 1 session" if turns else "")
-        + (", assembled by ChatGPT" if whole_resume else "")
-        + (", revised by ChatGPT" if revised else ""),
+        + (f", {turns} ChatGPT turns in 1 session" if turns else ""),
         level="result",
         job1={"company": job1_sel.company, "product": job1_sel.product,
               "bullets": len(job1_sel.bullets)},
@@ -2094,7 +3280,7 @@ async def extract_experience(
         # The full text, because the console is now the only place the finished
         # bullets are shown — the Jobs table no longer has an Experience column.
         extracted={
-            "summary": summary,
+            "summary": final_resume.get("summary", ""),
             "roles": [
                 _role_payload("Job 1 · first company", job1_sel),
                 _role_payload("Job 2 · most recent", job2_sel),
@@ -2105,27 +3291,15 @@ async def extract_experience(
     return {
         "job1": job1_sel.__dict__,
         "job2": job2_sel.__dict__,
-        "summary": summary,
-        "summarySource": summary_source,
-        "title": generated_title,
-        "titleSource": title_source,
-        "skillSet": skill_set,
-        "skillSetSource": skill_set_source,
-        # ChatGPT's categorization of skill_set, or [] when it never ran or
-        # didn't parse -- see build_tailored_data() in
-        # tailored_resume_service.py, which falls back to the flat skillSet
-        # (one uncategorized group) when this is empty.
-        "skillGroups": [{"category": c, "skills": s} for c, s in skill_groups],
+        "summary": final_resume.get("summary", ""),
+        "summarySource": "chatgpt",
+        "title": final_resume.get("resume_title", ""),
+        "titleSource": "chatgpt",
+        "skillSet": skill_set_flat,
+        "skillSetSource": "chatgpt",
+        "skillGroups": [{"category": c, "skills": s} for c, s in skill_groups_final],
         "search": vector_search.backend(),
-        # 'fallback' on either half means the AI provider wasn't used, which the
-        # UI surfaces rather than passing template text off as generated.
-        # 'chatgpt' overrides both: it means the text actually on the resume
-        # was revised by ChatGPT in step 8, regardless of which tier produced
-        # the bullets it revised.
-        "generator": (
-            "chatgpt" if revised else ("deepseek" if gen1 == gen2 == "deepseek" else "fallback")
-        ),
-        # How many prompts shared the one chat; 0 means ChatGPT was unavailable.
+        "generator": "chatgpt",
         "deepseekTurns": turns,
         "extractedAt": _now(),
     }

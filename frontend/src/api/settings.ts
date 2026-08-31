@@ -4,6 +4,40 @@ import { BACKEND_URL } from "../config";
 export type GenerationModel = "deepseek" | "chatgpt";
 
 export interface AppSettings {
+  /** New pipeline architecture, step 1: parses the job description into a
+   *  structured requirements object (JSON) for downstream retrieval and
+   *  matching. */
+  requirementsPrompt: string;
+  /** Step 2, right after step 1 in the same chat: converts that analysis
+   *  into atomic matching requirements (JSON). */
+  matchingRequirementsPrompt: string;
+  /** Step 4 (step 3 is pure Python/sentence-transformers, no prompt):
+   *  chooses Company 2 from step 3's shortlist, selects grounding
+   *  challenges, and classifies requirement coverage (JSON). */
+  selectionPrompt: string;
+  /** Step 5, right after step 4 in the same chat: generates structured
+   *  synthetic experience (JSON) only for step 4's own gaps/
+   *  generation_targets. */
+  syntheticGenerationPrompt: string;
+  /** Step 6, right after step 5 in the same chat: writes the final resume
+   *  bullets (6 for Company 1, 8 for Company 2) from the retrieved and
+   *  synthetic experience already established. */
+  bulletsPrompt: string;
+  /** Step 7, right after step 6 in the same chat: writes the overall resume
+   *  title, professional summary, skill set, each company's own role title,
+   *  and company summaries around step 6's now-final bullets, which it
+   *  copies back unchanged. */
+  resumeContentPrompt: string;
+  /** Step 8, right after step 7 in the same chat: a format-only pass that
+   *  wraps selective, already-existing words in [keyword] markers, bolds
+   *  each skill category's name, and returns the whole resume as XML. */
+  finalResumePrompt: string;
+  /** Step 9, right after step 8 in the same chat: a validation-only pass
+   *  that checks XML validity, Step 7->8 content preservation, bullet
+   *  counts, metric preservation, skills, keyword-marker limits, JD
+   *  coverage, and a final job-match score -- without rewriting anything.
+   *  Extraction currently stops right after this step. */
+  validationPrompt: string;
   skillsPrompt: string;
   tailoringPrompt: string;
   /** Writes the resume summary from the bullets, in the same ChatGPT chat

@@ -14,7 +14,7 @@ setting is a plain string for a homogeneous DEFAULTS-merge, and this one is
 a full ResumeData object.
 """
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import get_db
@@ -131,7 +131,7 @@ def save_sample_resume(data: ResumeData) -> ResumeData:
         conn.execute(
             statement.on_conflict_do_update(
                 index_elements=[settings.c.user_id, settings.c.key],
-                index_where=settings.c.scope == "user",
+                index_where=text("scope = 'user'"),
                 set_={"value": statement.excluded.value, "updated_at": func.now()},
             )
         )

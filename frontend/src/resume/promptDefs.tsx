@@ -60,6 +60,14 @@ export function PlaceholderList({ tokens }: { tokens: readonly string[] }) {
 }
 
 export type PromptKey =
+  | "requirementsPrompt"
+  | "matchingRequirementsPrompt"
+  | "selectionPrompt"
+  | "syntheticGenerationPrompt"
+  | "bulletsPrompt"
+  | "resumeContentPrompt"
+  | "finalResumePrompt"
+  | "validationPrompt"
   | "skillsPrompt"
   | "tailoringPrompt"
   | "companySummaryPrompt"
@@ -82,6 +90,143 @@ export interface PromptDef {
 // One entry per prompt, driving the dropdown on the Profile page instead of
 // stacking all seven textareas at once.
 export const PROMPT_DEFS: PromptDef[] = [
+  {
+    key: "requirementsPrompt",
+    label: "0a. Job requirements prompt (new architecture, step 1)",
+    description: (
+      <>
+        The new pipeline's actual step 1 — parses the job description into a
+        structured requirements object (skills, responsibilities, system
+        types, leadership expectations, business outcomes, ATS keywords, a
+        weighted matching-priority list) as JSON, for downstream retrieval
+        and matching to consume. Its full output is logged to the console.
+        The numbered prompts below are the old pipeline; extraction
+        currently stops right after step 9 (below), before reaching them,
+        while the rest of the new architecture is built out.
+      </>
+    ),
+    rows: 8,
+  },
+  {
+    key: "matchingRequirementsPrompt",
+    label: "0b. Matching requirements prompt (new architecture, step 2)",
+    description: (
+      <>
+        Runs right after step 1, in that same chat — converts the structured
+        analysis into atomic, independently matchable requirements (one
+        semantic-search query each) for retrieval, coverage-gap detection,
+        synthetic experience generation, and match scoring. No
+        placeholders: it's a pure follow-up relying entirely on step 1's
+        reply already being in the conversation. Its full output is logged
+        to the console.
+      </>
+    ),
+    rows: 8,
+  },
+  {
+    key: "selectionPrompt",
+    label: "0c. Selection & coverage prompt (new architecture, step 4)",
+    description: (
+      <>
+        Runs right after step 2, in that same chat — but step 3's own
+        output (Company 1's candidate challenges, the Company 2 shortlist)
+        is pure Python/sentence-transformers, so it's not already in the
+        conversation; it's included in this message explicitly, followed by
+        this prompt exactly as written. Chooses exactly one Company 2 from
+        step 3's shortlist, selects which retrieved challenges ground each
+        company's section, and classifies every important requirement as
+        strong/partial/uncovered with gap recommendations for a future
+        generation step. Its full output is logged to the console.
+      </>
+    ),
+    rows: 8,
+  },
+  {
+    key: "syntheticGenerationPrompt",
+    label: "0d. Synthetic experience prompt (new architecture, step 5)",
+    description: (
+      <>
+        Runs right after step 4, in that same chat — a pure follow-up, no
+        placeholders and nothing re-sent: step 4 ran in this chat, so its
+        gaps/generation_targets (and the retrieved challenges it saw) are
+        already in the conversation. Generates structured synthetic
+        challenges ONLY for the requirements step 4 flagged as still
+        needing coverage, fit to whichever company (1 or 2) and timeline
+        each gap was recommended for. Does not write resume bullets — this
+        is still source experience, one level below that. Its full output
+        is logged to the console.
+      </>
+    ),
+    rows: 8,
+  },
+  {
+    key: "bulletsPrompt",
+    label: "0e. Resume bullets prompt (new architecture, step 6)",
+    description: (
+      <>
+        Runs right after step 5, in that same chat — a pure follow-up, no
+        placeholders and nothing re-sent: steps 4 and 5 ran in this chat,
+        so the grounding plan, retrieved challenges, and synthetic
+        experience it needs are already in the conversation. Writes exactly
+        6 final resume bullets for Company 1 and 8 for Company 2, grounded
+        only in that already-established experience — no new facts,
+        metrics, or technologies. Its full output is logged to the console.
+      </>
+    ),
+    rows: 8,
+  },
+  {
+    key: "resumeContentPrompt",
+    label: "0f. Resume content prompt (new architecture, step 7)",
+    description: (
+      <>
+        Runs right after step 6, in that same chat — a pure follow-up, no
+        placeholders and nothing re-sent: everything it needs (coverage,
+        both companies' established role levels, and step 6's final
+        bullets) is already in the conversation. Writes the overall resume
+        title, professional summary, skill set, each company's own role
+        title, and company summaries — and copies step 6's bullets back
+        exactly, unchanged. Its full output is logged to the console.
+      </>
+    ),
+    rows: 8,
+  },
+  {
+    key: "finalResumePrompt",
+    label: "0g. Final formatting prompt (new architecture, step 8)",
+    description: (
+      <>
+        Runs right after step 7, in that same chat — a pure follow-up, no
+        placeholders and nothing re-sent: step 7 ran in this chat, so the
+        finalized content it must preserve verbatim is already in the
+        conversation. Format-only: wraps selective, already-existing words
+        in [keyword] markers, bolds each skill category's name, and returns
+        the whole resume as the &lt;resume&gt; XML structure the rest of the
+        app expects — no new content, no rewording. Its full output is
+        logged to the console.
+      </>
+    ),
+    rows: 8,
+  },
+  {
+    key: "validationPrompt",
+    label: "0h. Final validation prompt (new architecture, step 9)",
+    description: (
+      <>
+        Runs right after step 8, in that same chat — a pure follow-up, no
+        placeholders and nothing re-sent: every prior step ran in this chat,
+        so everything it checks against is already in the conversation.
+        Validation-only: checks XML validity, Step 7→8 content preservation,
+        each company's bullet count, metric preservation, skills, keyword-
+        marker limits, JD requirement coverage, and a final job-match score
+        — without rewriting the resume. Extraction currently stops right
+        after this step, before reaching the numbered prompts below, while
+        the rest of the new architecture is built out. Its full output is
+        logged to the console.
+      </>
+    ),
+    rows: 8,
+  },
   {
     key: "skillsPrompt",
     label: "1. Skill extraction prompt",

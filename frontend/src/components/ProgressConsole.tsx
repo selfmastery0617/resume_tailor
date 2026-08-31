@@ -37,6 +37,23 @@ function formatTime(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString(undefined, { hour12: false });
 }
 
+/** A step's full result (often a large JSON dump), collapsed by default so
+ *  scanning the console doesn't mean scrolling past a wall of text for
+ *  every step -- a one-line summary is enough most of the time, and the
+ *  full body is one click away when it isn't. */
+function ExpandablePreview({ text }: { text: string }) {
+  const firstLine = text.split("\n", 1)[0].trim();
+  return (
+    <details className="console-preview">
+      <summary className="console-preview-summary">
+        {firstLine || "Result"}
+        <span className="console-dim"> — {text.length.toLocaleString()} chars, click to expand</span>
+      </summary>
+      <div className="console-quote">{text}</div>
+    </details>
+  );
+}
+
 /** Renders the structured payload that accompanies some events. */
 function EventData({ data }: { data: Record<string, unknown> }) {
   const rows: React.ReactNode[] = [];
@@ -174,11 +191,7 @@ function EventData({ data }: { data: Record<string, unknown> }) {
     );
   }
   if (typeof data.preview === "string") {
-    rows.push(
-      <div key="preview" className="console-quote">
-        {data.preview}
-      </div>,
-    );
+    rows.push(<ExpandablePreview key="preview" text={data.preview} />);
   }
 
   return rows.length ? <div className="console-data">{rows}</div> : null;

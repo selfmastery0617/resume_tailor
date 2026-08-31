@@ -13,7 +13,13 @@ import re
 import time
 from typing import Any
 
-from app.services.chatgpt import CHATGPT_ORIGIN, PROFILE_DIR, is_signed_in
+from app.services.chatgpt import (
+    CHATGPT_ORIGIN,
+    COMPOSER_SELECTOR,
+    PROFILE_DIR,
+    has_session_cookie,
+    is_signed_in,
+)
 
 # A browser launch costs several seconds, so the verdict is cached. Same TTL as
 # DeepSeek's: long enough that reopening Settings is free, short enough that an
@@ -36,6 +42,23 @@ _lock = asyncio.Lock()
 
 class SignOutBlocked(RuntimeError):
     """The profile is in use, so it cannot be cleared right now."""
+
+
+def _diagnose_live_page(page: Any) -> dict[str, Any]:
+    """Same check as is_signed_in(), but reports which half failed.
+
+    Temporary-ish debugging aid: "not connected" alone doesn't say whether the
+    session cookie never showed up or the composer just hasn't rendered yet,
+    and those point at very different problems.
+    """
+    has_cookie = has_session_cookie(page)
+    composer_count = page.locator(COMPOSER_SELECTOR).count()
+    return {
+        "signed_in": has_cookie and composer_count > 0,
+        "has_cookie": has_cookie,
+        "composer_count": composer_count,
+        "url": page.url,
+    }
 
 
 def invalidate() -> None:
@@ -93,20 +116,26 @@ async def verify_session(force: bool = False) -> dict[str, Any]:
     # until they closed the window.
     from app.services.shared_browser import shared_browser
 
-    live = shared_browser.check_page(_TAB_PATTERN, is_signed_in)
-    if live is True:
-        invalidate()
-        return {
-            "connected": True,
-            "detail": "Signed in to ChatGPT.",
-            "verified": True,
-            "cached": False,
-            "signingIn": False,
-        }
-    if live is False:
+    live = shared_browser.check_page(_TAB_PATTERN, _diagnose_live_page)
+    if live is not None:
+        if live["signed_in"]:
+            invalidate()
+            return {
+                "connected": True,
+                "detail": "Signed in to ChatGPT.",
+                "verified": True,
+                "cached": False,
+                "signingIn": False,
+            }
+        detail = (
+            "Session cookie is set, but the chat composer hasn't appeared on "
+            f"the page yet (still on {live['url']})."
+            if live["has_cookie"]
+            else "Waiting for you to sign in…"
+        )
         return {
             "connected": False,
-            "detail": "Waiting for you to sign in…",
+            "detail": detail,
             "verified": True,
             "cached": False,
             "signingIn": True,

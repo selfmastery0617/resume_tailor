@@ -2157,6 +2157,22 @@ button.danger:disabled {
   word-break: break-word;
 }
 
+.console-preview { margin: 0.2rem 0; }
+
+.console-preview-summary {
+  cursor: pointer;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-preview-summary::marker { color: var(--text-dim); }
+
+.console-preview[open] > .console-preview-summary { white-space: normal; }
+
+.console-preview .console-quote { margin-top: 0.3rem; }
+
 /* ---- finished extraction, shown in full (no Experience column any more) ---- */
 .console-result {
   display: flex;
