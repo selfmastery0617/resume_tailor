@@ -197,6 +197,7 @@ def _row_to_dict(row) -> dict[str, Any]:
         "company": row.company,
         "location": row.location,
         "url": row.url,
+        "job_url": row.job_url,
         "description": row.description,
         "salary": row.salary_raw,
         "work_model": row.work_model,
@@ -428,7 +429,16 @@ def run_for_job(conn: Connection, job_id: str) -> UUID | None:
 
 # What the table may change. Everything else about a job comes from the import
 # or from the pipeline.
-EDITABLE_FIELDS = ("date_added", "title", "company", "url", "location", "status", "description")
+EDITABLE_FIELDS = (
+    "date_added",
+    "title",
+    "company",
+    "url",
+    "job_url",
+    "location",
+    "status",
+    "description",
+)
 
 # The two a person may choose between. 'not_applied' is reachable only by the
 # application clearing a row, never by a user: "no resume yet" is a fact about
@@ -491,6 +501,7 @@ def create_job(fields: dict[str, Any]) -> dict[str, Any]:
                 company=str(fields.get("company") or ""),
                 location=str(fields.get("location") or ""),
                 url=str(fields.get("url") or ""),
+                job_url=str(fields.get("job_url") or ""),
                 description=str(fields.get("description") or ""),
                 # A row is dated the day it appears, unless one was supplied.
                 date_added=_coerce_date(fields.get("date_added")) or _today(),
@@ -524,7 +535,7 @@ def update_job(job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
 
         values: dict[str, Any] = {}
 
-        for field in ("title", "company", "location", "url", "description"):
+        for field in ("title", "company", "location", "url", "job_url", "description"):
             if field in patch:
                 values[field] = str(patch[field] or "").strip()
 

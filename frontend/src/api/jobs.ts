@@ -41,6 +41,51 @@ export async function cancelImport(): Promise<ImportStatus> {
   return response.data;
 }
 
+export interface JobDescriptionExtractionStatus {
+  state: "idle" | "running" | "done" | "cancelled" | "failed";
+  jobIds: string[];
+  /** Eligible rows in this run. */
+  total: number;
+  /** Eligible rows processed, including individual failures. */
+  done: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  currentJobId: string | null;
+  currentLabel: string;
+  cancelRequested: boolean;
+  startedAt: string;
+  finishedAt: string;
+  error: string | null;
+  failures: string[];
+}
+
+/** Starts one fresh DeepSeek conversation for all eligible selected rows. */
+export async function startJobDescriptionExtraction(
+  jobIds: string[],
+): Promise<JobDescriptionExtractionStatus> {
+  const response = await axios.post<JobDescriptionExtractionStatus>(
+    `${BACKEND_URL}/api/jobs/extract-descriptions`,
+    { jobIds },
+  );
+  return response.data;
+}
+
+export async function fetchJobDescriptionExtractionStatus(): Promise<JobDescriptionExtractionStatus> {
+  const response = await axios.get<JobDescriptionExtractionStatus>(
+    `${BACKEND_URL}/api/jobs/extract-descriptions/status`,
+  );
+  return response.data;
+}
+
+/** Requests a cooperative stop after the current URL finishes. */
+export async function cancelJobDescriptionExtraction(): Promise<JobDescriptionExtractionStatus> {
+  const response = await axios.post<JobDescriptionExtractionStatus>(
+    `${BACKEND_URL}/api/jobs/extract-descriptions/cancel`,
+  );
+  return response.data;
+}
+
 /** A row typed or pasted into the empty row at the bottom of the table. */
 export async function createJob(fields: Record<string, string>): Promise<Job> {
   const response = await axios.post<Job>(`${BACKEND_URL}/api/jobs`, fields);
