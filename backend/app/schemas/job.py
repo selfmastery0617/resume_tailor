@@ -25,6 +25,7 @@ class StoredJob(BaseModel):
     company: str = ""
     location: str = ""
     url: str = ""
+    job_url: str = ""
     description: str = ""
     salary: str = ""
     work_model: str = ""

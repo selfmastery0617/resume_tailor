@@ -4,6 +4,8 @@ export interface Job {
   company: string;
   location: string;
   url: string;
+  /** Direct posting URL used by the Extract JD batch. */
+  job_url?: string;
   salary?: string | null;
   work_model?: string | null;
   publish_time?: string | null;

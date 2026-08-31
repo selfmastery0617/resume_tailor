@@ -73,6 +73,49 @@ def cancel_import():
     return importer.cancel()
 
 
+class ExtractDescriptionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jobIds: list[str]
+
+
+@router.post("/extract-descriptions")
+async def start_description_extraction(payload: ExtractDescriptionsRequest):
+    """Start one DeepSeek conversation and reuse it for the selected rows."""
+    from app.services.job_description_extractor import (
+        DescriptionExtractionBusy,
+        NoExtractableJobs,
+        extractor,
+    )
+
+    try:
+        return extractor.start(payload.jobIds)
+    except DescriptionExtractionBusy as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "DESCRIPTION_EXTRACTION_RUNNING", "message": str(exc)},
+        ) from exc
+    except NoExtractableJobs as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "NO_EXTRACTABLE_JOBS", "message": str(exc)},
+        ) from exc
+
+
+@router.get("/extract-descriptions/status")
+def description_extraction_status():
+    from app.services.job_description_extractor import extractor
+
+    return extractor.snapshot()
+
+
+@router.post("/extract-descriptions/cancel")
+def cancel_description_extraction():
+    from app.services.job_description_extractor import extractor
+
+    return extractor.cancel()
+
+
 class JobPatch(BaseModel):
     """One table edit. Only the fields present are changed."""
 
@@ -82,6 +125,7 @@ class JobPatch(BaseModel):
     title: str | None = None
     company: str | None = None
     url: str | None = None
+    job_url: str | None = None
     location: str | None = None
     status: str | None = None
     description: str | None = None
@@ -94,6 +138,7 @@ class CreateJobRequest(BaseModel):
     title: str = ""
     company: str = ""
     url: str = ""
+    job_url: str = ""
     location: str = ""
     description: str = ""
 

@@ -21,14 +21,18 @@ import type {
   ValueGetterParams,
 } from "ag-grid-community";
 import {
+  cancelJobDescriptionExtraction,
   cancelImport,
   createJob,
   deleteJobRows,
+  fetchJobDescriptionExtractionStatus,
   fetchImportStatus,
   fetchJobs,
+  startJobDescriptionExtraction,
   startImport,
   updateJob,
   type ImportStatus,
+  type JobDescriptionExtractionStatus,
 } from "../api/jobs";
 import {
   fetchAllTailoredResumes,
@@ -38,6 +42,7 @@ import {
 } from "../api/resumes";
 import { extractExperience, fetchAllExperience, type ExperienceResult } from "../api/experience";
 import { fetchSettledChatGptSession } from "../api/chatgpt";
+import { fetchSettledSessionStatus } from "../api/deepseek";
 import type { Job } from "../types/job";
 import { UrlCellRenderer } from "../components/UrlCellRenderer";
 import { ResumeCellRenderer, type ResumeGridContext } from "../components/ResumeCellRenderer";
@@ -90,6 +95,7 @@ const COLUMN_IDS = [
   "company",
   "title",
   "url",
+  "job_url",
   "description",
   "resume",
   "status",
@@ -101,12 +107,13 @@ const EDITABLE = new Set([
   "title",
   "company",
   "url",
+  "job_url",
   "status",
   "description",
 ]);
 
 /** Cleared by Delete. Status is excluded: it can never go back to empty. */
-const CLEARABLE = ["date_added", "title", "company", "url", "description"];
+const CLEARABLE = ["date_added", "title", "company", "url", "job_url", "description"];
 
 /** Splits a pasted TSV block into rows of cells, understanding Excel's own
  *  quoting: a field that itself contains a tab, a newline, or a quote comes
@@ -175,9 +182,8 @@ function quoteTsvField(value: string): string {
 }
 
 interface JobsPageProps {
-  /** Changes when a provider's session may have, so the ChatGPT-connection
-   *  banner re-checks instead of standing on the answer it got when the tab
-   *  first mounted. */
+  /** Changes when a provider's session may have, so the connection banners
+   *  re-check instead of standing on the answers from the initial mount. */
   sessionVersion: number;
   /** True while this tab is visible. Pages stay mounted to preserve unsaved
    *  edits, so they must refresh on activation or they show stale data --
@@ -194,10 +200,13 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
   const [resumeGenerating, setResumeGenerating] = useState<Map<string, number>>(new Map());
   const [importOpen, setImportOpen] = useState(false);
   const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
+  const [jdExtractionStatus, setJdExtractionStatus] =
+    useState<JobDescriptionExtractionStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(20);
   const [chatGptConnected, setChatGptConnected] = useState(true);
+  const [deepSeekConnected, setDeepSeekConnected] = useState(true);
   const [deletingRows, setDeletingRows] = useState<Set<string>>(new Set());
   // Ticked checkboxes, kept here so the toolbar can act on them. AG Grid holds
   // the authoritative state; this mirrors it for rendering.
@@ -210,6 +219,13 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
   // empty row that renders pipeline controls reads as broken data, and "Add
   // row" says what it does. Paste past the last row still creates rows.
   const rows = jobs;
+  const jdExtractionRunning = jdExtractionStatus?.state === "running";
+  const eligibleSelectedCount = useMemo(() => {
+    const selected = new Set(selectedIds);
+    return jobs.filter(
+      (job) => selected.has(job.id) && !job.locked && Boolean(job.job_url?.trim()),
+    ).length;
+  }, [jobs, selectedIds]);
 
   const range = useCellRange(wrapperRef, {
     columnIds: COLUMN_IDS,
@@ -257,6 +273,14 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
       } catch {
         /* the toolbar just shows "Import Jobs" */
       }
+      try {
+        // Description extraction also belongs to the backend process, so a
+        // page reload reconnects to the active batch instead of orphaning it.
+        const status = await fetchJobDescriptionExtractionStatus();
+        if (status.state === "running") setJdExtractionStatus(status);
+      } catch {
+        /* Extract JD remains available; starting it will surface API errors. */
+      }
     })();
   }, [active, reload]);
 
@@ -270,6 +294,12 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
         if (alive) setChatGptConnected(status.connected);
       } catch {
         if (alive) setChatGptConnected(false);
+      }
+      try {
+        const status = await fetchSettledSessionStatus();
+        if (alive) setDeepSeekConnected(status.connected);
+      } catch {
+        if (alive) setDeepSeekConnected(false);
       }
     })();
     return () => {
@@ -631,6 +661,8 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
 
   const [bulkGenerating, setBulkGenerating] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
+  const resumePipelineRunning =
+    bulkGenerating || experienceExtracting.size > 0 || resumeGenerating.size > 0;
 
   // Jobs cannot extract/generate concurrently — the DeepSeek/ChatGPT browser
   // session is one shared profile with a single lock, so a second job's
@@ -746,6 +778,72 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     }
   }, []);
 
+  // The backend owns this batch and its one DeepSeek conversation. Polling
+  // makes completed descriptions appear one row at a time and also lets a
+  // refreshed page reconnect to a run that is still active.
+  useEffect(() => {
+    if (jdExtractionStatus?.state !== "running") return;
+    let cancelled = false;
+    const id = window.setInterval(async () => {
+      try {
+        const next = await fetchJobDescriptionExtractionStatus();
+        if (cancelled) return;
+        setJdExtractionStatus(next);
+        await reload();
+        if (next.state === "running") return;
+
+        if (next.state === "failed") {
+          setError(next.error || "Job-description extraction failed.");
+          return;
+        }
+
+        const summary = `${next.succeeded}/${next.total} job description${
+          next.total === 1 ? "" : "s"
+        } extracted`;
+        setNotice(next.state === "cancelled" ? `Stopped — ${summary}.` : `${summary}.`);
+        if (next.failed > 0) {
+          const details = next.failures.slice(0, 3).join("; ");
+          setError(
+            `${next.failed} row${next.failed === 1 ? "" : "s"} failed` +
+              (details ? `: ${details}` : "."),
+          );
+        }
+      } catch {
+        /* a missed poll is harmless; the next one catches up */
+      }
+    }, 900);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [jdExtractionStatus?.state, reload]);
+
+  const handleStartJdExtraction = useCallback(async () => {
+    if (resumePipelineRunning) {
+      setError("Wait for the current resume extraction or generation to finish.");
+      return;
+    }
+    if (!eligibleSelectedCount) {
+      setError("Select at least one unlocked row with a non-empty Job URL.");
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    try {
+      setJdExtractionStatus(await startJobDescriptionExtraction(selectedIds));
+    } catch (err) {
+      setError(describeError(err, "Could not start job-description extraction."));
+    }
+  }, [eligibleSelectedCount, resumePipelineRunning, selectedIds]);
+
+  const handleCancelJdExtraction = useCallback(async () => {
+    try {
+      setJdExtractionStatus(await cancelJobDescriptionExtraction());
+    } catch (err) {
+      setError(describeError(err, "Could not stop job-description extraction."));
+    }
+  }, []);
+
   // -- columns ---------------------------------------------------------------
 
   const columnDefs = useMemo<ColDef<Job>[]>(() => {
@@ -816,6 +914,16 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
         ...selectable("url"),
       },
       {
+        colId: "job_url",
+        field: "job_url",
+        headerName: "Job URL",
+        flex: 1,
+        minWidth: 170,
+        editable: true,
+        cellRenderer: UrlCellRenderer,
+        ...selectable("job_url"),
+      },
+      {
         colId: "description",
         field: "description",
         headerName: "Description",
@@ -871,7 +979,7 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     experienceResults,
     resumeGenerating,
     resumeResults,
-    bulkRunning: bulkGenerating,
+    bulkRunning: resumePipelineRunning || jdExtractionRunning,
     onGenerateResume: handleGenerateResume,
     onOpenFolder: handleOpenFolder,
     deletingRows,
@@ -891,11 +999,42 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
         <button type="button" onClick={() => void addRow()}>
           + Add row
         </button>
+        {jdExtractionRunning ? (
+          <button
+            type="button"
+            className="danger"
+            onClick={() => void handleCancelJdExtraction()}
+            disabled={jdExtractionStatus.cancelRequested}
+          >
+            <span className="spinner" aria-hidden="true" />
+            Stop Extracting
+            <span aria-label="job-description extraction progress">
+              {` ${jdExtractionStatus.done}/${jdExtractionStatus.total}`}
+            </span>
+          </button>
+        ) : (
+          selectedIds.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void handleStartJdExtraction()}
+              disabled={resumePipelineRunning || eligibleSelectedCount === 0}
+              title={
+                eligibleSelectedCount === 0
+                  ? "Selected rows need a non-empty Job URL and must not be applied."
+                  : `Extract descriptions for ${eligibleSelectedCount} eligible row${
+                      eligibleSelectedCount === 1 ? "" : "s"
+                    } in one DeepSeek session.`
+              }
+            >
+              Extract JD
+            </button>
+          )
+        )}
         {selectedIds.length > 0 && (
           <button
             type="button"
             onClick={() => void generateSelectedResumes()}
-            disabled={bulkGenerating}
+            disabled={bulkGenerating || jdExtractionRunning}
           >
             {bulkGenerating && <span className="spinner" aria-hidden="true" />}
             {bulkGenerating
@@ -908,7 +1047,7 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
             type="button"
             className="danger"
             onClick={() => void deleteCheckedRows()}
-            disabled={bulkGenerating}
+            disabled={bulkGenerating || jdExtractionRunning}
           >
             Delete {selectedIds.length} selected
           </button>
@@ -940,6 +1079,13 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
         <p className="notice">
           ChatGPT is not connected, so generating a resume will fall back to
           composing bullets from your database.json. Connect it on the{" "}
+          <strong>Settings</strong> tab.
+        </p>
+      )}
+      {!deepSeekConnected && (
+        <p className="notice">
+          DeepSeek is not connected. Extract JD requires a connected session;
+          connect it on the{" "}
           <strong>Settings</strong> tab.
         </p>
       )}
