@@ -95,10 +95,6 @@ jobs = Table(
     Column("company", Text, nullable=False, server_default=text("''")),
     Column("location", Text, nullable=False, server_default=text("''")),
     Column("url", Text, nullable=False, server_default=text("''")),
-    # A direct posting link supplied by the user. This is intentionally
-    # separate from the imported/source URL: DeepSeek uses it to fetch the
-    # description, while re-importing a row may continue to refresh `url`.
-    Column("job_url", Text, nullable=False, server_default=text("''")),
     # The full description, not the summary. Postgres stores large values out of
     # line automatically, so there is no size concern here.
     Column("description", Text, nullable=False, server_default=text("''")),
