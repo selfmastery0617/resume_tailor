@@ -70,7 +70,15 @@ PAGE_LOAD_TIMEOUT_MS = 45_000
 # a launch in isolation — this must tolerate that, not just a cold start.
 LOGIN_CHECK_TIMEOUT_S = 15.0
 LOGIN_CHECK_POLL_S = 0.5
-REPLY_START_TIMEOUT_S = 60.0
+# This clock starts only once send_message() has already fully returned
+# (ChatGPTConversation._serve() calls them strictly in sequence), so it is
+# purely "how long after a confirmed-sent message until anything shows up" --
+# not inflated by send_message()'s own, separately-timed-out delivery work.
+# Observed a genuine ~120s gap between a message that was confirmed sent and
+# its first visible reply text late in a long, heavy conversation with a
+# reasoning model (ChatGPT Pro, "high" effort) -- 60s was tuned before that
+# combination was in play and is too tight for it.
+REPLY_START_TIMEOUT_S = 180.0
 # Generous: a reasoning model (ChatGPT Pro, "high" effort) can spend several
 # minutes actually thinking before the real answer appears, with no growth in
 # the visible text to show it is still working -- see MIN_STABLE_REPLY_CHARS.
@@ -91,6 +99,11 @@ MIN_STABLE_REPLY_CHARS = 40
 # independent of anything about waiting for a reply. This governs
 # send_message()'s click()/fill() specifically, not reply waiting.
 SEND_ACTION_TIMEOUT_MS = 90_000
+# Real keystroke simulation (send_message()'s last-resort fallback) is far
+# slower than fill() for a large message -- each character is a genuine
+# keydown/input/keyup round trip, not a single DOM write. Generous budget
+# since this only runs when fill() has already failed to register.
+TYPE_FALLBACK_TIMEOUT_MS = 180_000
 
 __all__ = [
     "PROFILE_DIR",
@@ -188,31 +201,48 @@ def assert_logged_in(page: Any) -> None:
         page.wait_for_timeout(int(LOGIN_CHECK_POLL_S * 1000))
 
 
-def _paste_into_composer(chat_input: Any, message: str) -> None:
-    """Insert `message` via a synthetic paste event instead of fill().
+def _notify_input_changed(chat_input: Any) -> None:
+    """Nudge ProseMirror/React to notice fill()'s DOM write.
 
-    fill() types into the contenteditable ProseMirror editor character by
-    character under the hood; observed silently under-filling it for a very
-    large message (a step 3 payload with full retrieved-challenge evidence
-    now regularly exceeds what fill() reliably lands), after which Enter
-    just submits whatever partial text did land. A paste event is a single
-    atomic operation the editor's own paste handler processes in one shot,
-    the same way a person pasting a huge block of text would -- no OS
-    clipboard access needed, since the DataTransfer is constructed directly.
+    fill() writes into the contenteditable DOM directly, bypassing
+    ProseMirror's own transaction system entirely -- the visible text
+    updates, but ProseMirror's internal editor state (which the send
+    button's enabled/disabled state actually reflects) doesn't necessarily
+    get told anything changed. A generic 'input' event is the same signal a
+    real keystroke would fire, without going through paste handling
+    specifically: dispatching a genuine ClipboardEvent('paste') was tried
+    here first and confirmed to break something else instead -- above some
+    size, ChatGPT's own UI collapses a pasted block into a "Pasted text"
+    attachment chip rather than literal inline text, and the model then
+    reads that label as part of its own context, producing replies with the
+    literal text "Pasted text" embedded inside generated content (observed
+    directly inside JSON string fields ChatGPT itself wrote). A plain
+    'input' event carries no such paste-specific handling to trigger that.
     """
-    chat_input.fill("", timeout=SEND_ACTION_TIMEOUT_MS)
-    chat_input.evaluate(
-        """(el, text) => {
-            el.focus();
-            const dt = new DataTransfer();
-            dt.setData('text/plain', text);
-            const evt = new ClipboardEvent('paste', {
-                clipboardData: dt, bubbles: true, cancelable: true,
-            });
-            el.dispatchEvent(evt);
-        }""",
-        message,
-    )
+    chat_input.evaluate("(el) => el.dispatchEvent(new Event('input', { bubbles: true }))")
+
+
+def _wait_for_send_button_enabled(page: Any, send_button: Any, timeout_s: float = 10.0) -> bool:
+    """Poll for the send button to lose its aria-disabled state.
+
+    This is the one signal that actually reflects whether ChatGPT's own app
+    registered the composer's content -- not the composer's visible text.
+    Observed directly: fill() can leave the composer showing the full
+    message while the send button stays aria-disabled="true" for the full
+    length of a 90s click timeout, because the DOM write never reached
+    ProseMirror's own state (see _notify_input_changed's docstring). A
+    truncated composer would also leave the button disabled, so this
+    subsumes the old "did the text land" check rather than needing both.
+    """
+    if send_button.count() == 0:
+        return False
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if send_button.get_attribute("aria-disabled") != "true":
+            return True
+        if time.monotonic() > deadline:
+            return False
+        page.wait_for_timeout(int(STABILITY_POLL_INTERVAL_S * 1000))
 
 
 def _wait_for_composer_to_clear(
@@ -235,52 +265,50 @@ def _wait_for_composer_to_clear(
 
 def send_message(page: Any, message: str) -> None:
     chat_input = page.locator(CHAT_INPUT_SELECTOR).first
+    send_button = page.locator(SEND_BUTTON_SELECTOR).first
     chat_input.click(timeout=SEND_ACTION_TIMEOUT_MS)
-    # fill() writes directly into the contenteditable ProseMirror editor, same
-    # as it would a plain textarea's value — confirmed working for ordinary
-    # messages, no keystroke simulation needed. Explicit timeout: see
-    # SEND_ACTION_TIMEOUT_MS -- a large message can take longer to type than
-    # Playwright's 30s default.
+
+    # fill() writes directly into the contenteditable ProseMirror editor,
+    # same as it would a plain textarea's value -- confirmed working, no
+    # keystroke simulation needed for the DOM write itself. Explicit
+    # timeout: see SEND_ACTION_TIMEOUT_MS -- a large message can take
+    # longer to type than Playwright's 30s default.
     chat_input.fill(message, timeout=SEND_ACTION_TIMEOUT_MS)
+    _notify_input_changed(chat_input)
 
-    # Verify what actually landed before submitting -- fill() can silently
-    # under-fill this editor for a very large message (see
-    # _paste_into_composer's docstring). Submitting a truncated prompt with
-    # Enter would send a broken request and confuse the whole turn, so catch
-    # it here instead.
-    landed = chat_input.inner_text()
-    if len(landed) < len(message) * 0.95:
-        _paste_into_composer(chat_input, message)
-        landed = chat_input.inner_text()
-        if len(landed) < len(message) * 0.95:
+    if not _wait_for_send_button_enabled(page, send_button):
+        # Last resort: genuine keystroke simulation. Much slower than
+        # fill() for a large message -- each character is a real
+        # keydown/input/keyup round trip -- but it is what a real person
+        # typing would produce, so it carries neither fill()'s
+        # state-desync risk nor a paste event's "collapse into a Pasted
+        # text attachment" risk (see _notify_input_changed's docstring).
+        chat_input.fill("", timeout=SEND_ACTION_TIMEOUT_MS)
+        chat_input.press_sequentially(message, timeout=TYPE_FALLBACK_TIMEOUT_MS)
+        if not _wait_for_send_button_enabled(page, send_button, timeout_s=15.0):
             raise ChatGPTError(
-                "ChatGPT's composer did not accept the full message "
-                f"({len(landed)} of {len(message)} characters landed) -- "
-                "not sending, to avoid submitting a truncated prompt."
+                "ChatGPT's send button never became enabled after filling "
+                "the composer -- the app's own editor state never "
+                "registered the message, so it was never actually "
+                "submittable. Not waiting for a reply that was never asked "
+                "for."
             )
 
-    page.keyboard.press("Enter")
+    # Click the send button directly rather than pressing Enter: Enter's own
+    # handler is exposed to the same ProseMirror-state-desync risk that
+    # motivated checking the button's enabled state in the first place, and
+    # the button is already right here, already confirmed enabled.
+    send_button.click(timeout=SEND_ACTION_TIMEOUT_MS)
 
-    # Enter alone does not always register as "submit" on this composer --
-    # confirm the composer actually cleared, and fall back to clicking the
-    # send button directly if it's still sitting there holding the message.
-    # Without this, a failed submit looks identical to a slow reply: nothing
-    # raises, and the caller just waits out the full reply timeout for a
-    # turn that was never actually asked. Polled rather than a single fixed
-    # wait: the page can still be settling from a large previous reply right
-    # when this runs, and a snap check right after Enter would misread that
-    # brief lag as a genuine failure to submit.
+    # Confirm the click actually submitted rather than trusting it silently
+    # -- without this, a failed submit looks identical to a slow reply:
+    # nothing raises, and the caller just waits out the full reply timeout
+    # for a turn that was never actually asked.
     if not _wait_for_composer_to_clear(page, chat_input, message):
-        send_button = page.locator(SEND_BUTTON_SELECTOR).first
-        if send_button.count() > 0:
-            send_button.click(timeout=SEND_ACTION_TIMEOUT_MS)
-        if not _wait_for_composer_to_clear(page, chat_input, message):
-            raise ChatGPTError(
-                "ChatGPT did not submit the message -- the composer still "
-                "holds it after pressing Enter (and clicking Send, if a "
-                "send button was found). Not waiting for a reply that will "
-                "never come."
-            )
+        raise ChatGPTError(
+            "Clicked Send but the composer still holds the message -- not "
+            "waiting for a reply that was never actually requested."
+        )
 
 
 def reply_text(page: Any) -> str:
