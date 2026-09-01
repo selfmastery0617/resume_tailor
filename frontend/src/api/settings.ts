@@ -32,12 +32,17 @@ export interface AppSettings {
    *  wraps selective, already-existing words in [keyword] markers, bolds
    *  each skill category's name, and returns the whole resume as XML. */
   finalResumePrompt: string;
-  /** Step 9, right after step 8 in the same chat: a validation-only pass
-   *  that checks XML validity, Step 7->8 content preservation, bullet
-   *  counts, metric preservation, skills, keyword-marker limits, JD
-   *  coverage, and a final job-match score -- without rewriting anything.
-   *  Extraction currently stops right after this step. */
+  /** Step 9: a validation-only pass that checks XML validity, Step 7->8
+   *  content preservation, bullet counts, metric preservation, skills,
+   *  keyword-marker limits, JD coverage, and a final job-match score --
+   *  without rewriting anything. Currently skipped in extraction (step 10
+   *  runs right after step 8 instead), but still editable here for
+   *  whenever it's re-enabled. */
   validationPrompt: string;
+  /** Step 10, right after step 8 in the same chat (step 9 is skipped):
+   *  writes a tailored cover letter grounded in the finalized resume,
+   *  returned as XML. Extraction currently stops right after this step. */
+  coverLetterPrompt: string;
   skillsPrompt: string;
   tailoringPrompt: string;
   /** Writes the resume summary from the bullets, in the same ChatGPT chat

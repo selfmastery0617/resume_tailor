@@ -68,6 +68,7 @@ export type PromptKey =
   | "resumeContentPrompt"
   | "finalResumePrompt"
   | "validationPrompt"
+  | "coverLetterPrompt"
   | "skillsPrompt"
   | "tailoringPrompt"
   | "companySummaryPrompt"
@@ -101,7 +102,7 @@ export const PROMPT_DEFS: PromptDef[] = [
         weighted matching-priority list) as JSON, for downstream retrieval
         and matching to consume. Its full output is logged to the console.
         The numbered prompts below are the old pipeline; extraction
-        currently stops right after step 9 (below), before reaching them,
+        currently stops right after step 10 (below), before reaching them,
         while the rest of the new architecture is built out.
       </>
     ),
@@ -213,16 +214,33 @@ export const PROMPT_DEFS: PromptDef[] = [
     label: "0h. Final validation prompt (new architecture, step 9)",
     description: (
       <>
-        Runs right after step 8, in that same chat — a pure follow-up, no
-        placeholders and nothing re-sent: every prior step ran in this chat,
-        so everything it checks against is already in the conversation.
-        Validation-only: checks XML validity, Step 7→8 content preservation,
-        each company's bullet count, metric preservation, skills, keyword-
-        marker limits, JD requirement coverage, and a final job-match score
-        — without rewriting the resume. Extraction currently stops right
-        after this step, before reaching the numbered prompts below, while
-        the rest of the new architecture is built out. Its full output is
-        logged to the console.
+        Would run right after step 8, in that same chat — a pure follow-up,
+        no placeholders and nothing re-sent: every prior step ran in this
+        chat, so everything it checks against is already in the
+        conversation. Validation-only: checks XML validity, Step 7→8
+        content preservation, each company's bullet count, metric
+        preservation, skills, keyword-marker limits, JD requirement
+        coverage, and a final job-match score — without rewriting the
+        resume. Currently skipped in extraction (step 10, below, runs right
+        after step 8 instead), but still editable here for whenever it's
+        re-enabled.
+      </>
+    ),
+    rows: 8,
+  },
+  {
+    key: "coverLetterPrompt",
+    label: "0i. Cover letter prompt (new architecture, step 10)",
+    description: (
+      <>
+        Runs right after step 8, in that same chat (step 9 is skipped) — a
+        pure follow-up, no placeholders and nothing re-sent: the finalized
+        resume it must stay consistent with is already in the conversation.
+        Writes a concise, tailored cover letter grounded only in
+        already-established resume evidence, returned as XML. Extraction
+        currently stops right after this step, before reaching the numbered
+        prompts below, while the rest of the new architecture is built out.
+        Its full output is logged to the console.
       </>
     ),
     rows: 8,
