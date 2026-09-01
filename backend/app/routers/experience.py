@@ -202,4 +202,32 @@ async def extract(payload: ExtractRequest):
         raise _bad_request("EXTRACTION_FAILED", str(exc)) from exc
 
     experience_service.save_experience(payload.jobId, result)
+    await _auto_generate_pdfs(payload.jobId)
     return result
+
+
+async def _auto_generate_pdfs(job_id: str) -> None:
+    """Resume + cover letter PDFs right after extraction, no separate click
+    needed. Best-effort: a PDF failure (no output folder set yet, no
+    profile, ...) must not turn a successful extraction into a failed
+    request -- the console panel already carries the detail, and the
+    existing manual regenerate buttons stay available either way.
+    """
+    from app.services import job_store, tailored_cover_letter_service, tailored_resume_service
+    from app.services.progress import progress
+    from app.services.tailored_resume_service import TailoredResumeError
+
+    job = job_store.get_job(job_id)
+    try:
+        await tailored_resume_service.generate_for_job(
+            job_id=job_id, company=job["company"], job_title=job["title"]
+        )
+    except TailoredResumeError as exc:
+        progress.emit("resume", f"Automatic resume PDF failed ({exc})", level="warn")
+
+    try:
+        await tailored_cover_letter_service.generate_for_job(
+            job_id=job_id, company=job["company"], job_title=job["title"]
+        )
+    except TailoredResumeError as exc:
+        progress.emit("coverletter", f"Automatic cover letter PDF failed ({exc})", level="warn")

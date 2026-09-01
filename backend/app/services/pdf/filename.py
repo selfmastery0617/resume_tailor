@@ -45,6 +45,16 @@ def build_pdf_filename(profile_name: str, template_id: str) -> str:
     return f"{stem}.pdf" if stem else FALLBACK
 
 
+def build_cover_letter_pdf_filename(profile_name: str, template_id: str) -> str:
+    """Download-name shape for an ad-hoc cover letter PDF, mirroring
+    build_pdf_filename's <profile-slug>-<template-slug>-resume.pdf."""
+    parts = [p for p in (_slugify(profile_name), _slugify(template_id)) if p]
+    if not parts:
+        return "cover-letter.pdf"
+    stem = "-".join([*parts, "cover-letter"])[:MAX_STEM_LENGTH].strip("-")
+    return f"{stem}.pdf" if stem else "cover-letter.pdf"
+
+
 def sanitize_component(value: str, fallback: str = "Unknown") -> str:
     """Make `value` safe as a single path component, preserving readability.
 
@@ -78,6 +88,12 @@ def build_job_folder_name(company: str, job_title: str, when: date | None = None
 def build_tailored_pdf_filename(profile_name: str) -> str:
     """`<Profile Name>_resume.pdf`, as specified for the saved file."""
     return f"{sanitize_component(profile_name, 'profile')}_resume.pdf"
+
+
+def build_tailored_cover_letter_filename(profile_name: str) -> str:
+    """`<Profile Name>_cover_letter.pdf`, saved alongside the resume in the
+    same per-job folder (see build_job_folder_name)."""
+    return f"{sanitize_component(profile_name, 'profile')}_cover_letter.pdf"
 
 
 def build_profile_folder_name(profile_name: str) -> str:

@@ -218,7 +218,7 @@ export function ContactBlock({
   if (linkedin) {
     contactItems.push(
       <a href={linkedin} target="_blank" rel="noopener noreferrer" style={{ color: "inherit" }}>
-        {displayUrl(profile.linkedin)}
+        LinkedIn
       </a>,
     );
   }

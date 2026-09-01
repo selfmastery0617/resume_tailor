@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { JobsPage } from "./pages/JobsPage";
 import { TemplatesPage } from "./pages/TemplatesPage";
+import { CoverLetterTemplatesPage } from "./pages/CoverLetterTemplatesPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { TemplateBuilderPage } from "./pages/TemplateBuilderPage";
@@ -30,7 +31,7 @@ function App() {
   const [jobrightOk, setJobrightOk] = useState<boolean | null>(null);
   const [chatGptOk, setChatGptOk] = useState<boolean | null>(null);
   const [activeTab, setActiveTab] = useState<
-    "jobs" | "profile" | "templates" | "builder" | "settings"
+    "jobs" | "profile" | "templates" | "coverLetterTemplates" | "builder" | "settings"
   >("jobs");
   // The backend is serving code older than the files on disk. Silent until it
   // happens, and it has caused several rounds of "the feature does nothing".
@@ -115,6 +116,7 @@ function App() {
     { id: "jobs", label: "Jobs", icon: "📋" },
     { id: "profile", label: "Profile", icon: "👤" },
     { id: "templates", label: "Templates", icon: "🎨" },
+    { id: "coverLetterTemplates", label: "Cover Letter Templates", icon: "✉️" },
     { id: "builder", label: "Builder", icon: "🧩" },
     { id: "settings", label: "Settings", icon: "⚙️" },
   ];
@@ -212,6 +214,10 @@ function App() {
 
       <div hidden={activeTab !== "templates"}>
         <TemplatesPage active={activeTab === "templates"} />
+      </div>
+
+      <div hidden={activeTab !== "coverLetterTemplates"}>
+        <CoverLetterTemplatesPage active={activeTab === "coverLetterTemplates"} />
       </div>
 
       <div hidden={activeTab !== "builder"}>

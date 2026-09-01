@@ -1,4 +1,6 @@
 import type { CustomCellRendererProps } from "ag-grid-react";
+import type { TailoredCoverLetter } from "../api/coverLetters";
+import { tailoredCoverLetterUrl } from "../api/coverLetters";
 import type { ExperienceResult } from "../api/experience";
 import type { TailoredResume } from "../api/resumes";
 import { tailoredResumeUrl } from "../api/resumes";
@@ -10,6 +12,10 @@ export interface ResumeGridContext {
   resumeGenerating: Map<string, number>;
   /** job id -> saved PDF; drives the badge after a refresh. */
   resumeResults: Record<string, TailoredResume>;
+  /** job id -> saved cover letter PDF, generated automatically alongside the
+   *  resume once extraction reaches step 10 -- shown as a second, narrower
+   *  badge in the same cell rather than its own column. */
+  coverLetterResults: Record<string, TailoredCoverLetter>;
   /** job id -> epoch ms extraction started, for the first phase of the run. */
   experienceExtracting: Map<string, number>;
   /** Whether this job already has bullets, which decides the button's label. */
@@ -20,6 +26,28 @@ export interface ResumeGridContext {
   bulkRunning: boolean;
   onGenerateResume: (job: Job) => void;
   onOpenFolder: (job: Job) => void;
+}
+
+/** A narrower companion badge to the resume's own -- only shown once a cover
+ *  letter PDF actually exists (step 10 is best-effort, so not every job will
+ *  have one, unlike the resume). No separate extract/generate button of its
+ *  own: the resume button's own click already drives extraction, which
+ *  produces both PDFs together (see the automatic-generation note in
+ *  routers/experience.py). */
+function CoverLetterBadge({ job, context }: { job: Job; context: ResumeGridContext }) {
+  const saved = context.coverLetterResults[job.id];
+  if (!saved || !saved.exists) return null;
+  return (
+    <a
+      className="cover-letter-badge"
+      href={tailoredCoverLetterUrl(job.id)}
+      target="_blank"
+      rel="noreferrer"
+      title={`${saved.filePath}\n${saved.pageCount} page${saved.pageCount === 1 ? "" : "s"} · cover letter`}
+    >
+      ✉️
+    </a>
+  );
 }
 
 export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
@@ -97,6 +125,7 @@ export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
         >
           📄 {saved.fileName}
         </a>
+        <CoverLetterBadge job={data} context={context} />
         <button
           type="button"
           className="resume-open-folder"

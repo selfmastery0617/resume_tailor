@@ -47,12 +47,23 @@ class PdfGenerationError(RuntimeError):
 
 
 def _page_spec(payload: dict[str, Any]) -> tuple[float, float, dict[str, float]]:
-    """Validated template geometry, with legacy/built-in Letter fallbacks."""
+    """Validated template geometry, with legacy/built-in Letter fallbacks.
 
-    layout = payload.get("layout")
-    page = layout.get("page") if isinstance(layout, dict) else None
+    A resume reads page size/margins from payload.layout.page (see
+    TemplateLayoutV2 in layoutTypes.ts) -- a cover letter has no layout
+    document at all (see CoverLetterStyle, app/schemas/cover_letter_style.py),
+    so its own pageSize/marginTopIn/etc. live directly on payload.style
+    instead. Both shapes use the same field names, so the rest of this
+    function doesn't need to care which one it's reading.
+    """
+
+    if payload.get("documentType") == "coverLetter":
+        page = payload.get("style") or {}
+    else:
+        layout = payload.get("layout")
+        page = layout.get("page") if isinstance(layout, dict) else None
     page = page if isinstance(page, dict) else {}
-    size = page.get("size", DEFAULT_PAGE_SIZE)
+    size = page.get("size") or page.get("pageSize") or DEFAULT_PAGE_SIZE
     width, height = PAPER_DIMENSIONS_IN.get(size, PAPER_DIMENSIONS_IN[DEFAULT_PAGE_SIZE])
 
     def margin(field: str, fallback: float) -> float:
@@ -95,14 +106,32 @@ def content_hash(payload: dict[str, Any]) -> str:
 
 
 def _apply_metadata(pdf_bytes: bytes, payload: dict[str, Any]) -> bytes:
-    """Attach document metadata (RG-FR-022)."""
+    """Attach document metadata (RG-FR-022).
+
+    /Title is what a browser shows as the new tab's title when a PDF is
+    opened inline -- a cover letter's payload.data has no `profile` key at
+    all (see CoverLetterData, app/schemas/cover_letter.py), so reading
+    resume-shaped fields from it always fell through to the "Resume"
+    fallback below, regardless of which document this actually was.
+    """
     from pypdf import PdfReader, PdfWriter
 
-    profile = (payload.get("data") or {}).get("profile") or {}
-    name = (profile.get("fullName") or "").strip() or "Resume"
-    title = (profile.get("professionalTitle") or "").strip()
-    skills = [s.get("name", "") for s in (payload.get("data") or {}).get("skills", [])]
-    keywords = ", ".join([p for p in [title, *skills[:10]] if p])
+    data = payload.get("data") or {}
+    if payload.get("documentType") == "coverLetter":
+        name = (data.get("candidateName") or "").strip() or "Cover Letter"
+        job_title = (data.get("jobTitle") or "").strip()
+        company = (data.get("companyName") or "").strip()
+        subject = "Cover Letter"
+        title = f"{name} — Cover Letter" + (f" ({job_title} at {company})" if job_title and company else "")
+        keywords = ", ".join(p for p in [job_title, company] if p)
+    else:
+        profile = data.get("profile") or {}
+        name = (profile.get("fullName") or "").strip() or "Resume"
+        role_title = (profile.get("professionalTitle") or "").strip()
+        skills = [s.get("name", "") for s in data.get("skills", [])]
+        subject = "Resume"
+        title = f"{name} — {role_title}" if role_title else name
+        keywords = ", ".join([p for p in [role_title, *skills[:10]] if p])
 
     now = datetime.now(timezone.utc).strftime("D:%Y%m%d%H%M%SZ")
 
@@ -113,8 +142,8 @@ def _apply_metadata(pdf_bytes: bytes, payload: dict[str, Any]) -> bytes:
     writer.add_metadata(
         {
             "/Author": name,
-            "/Title": f"{name} — {title}" if title else name,
-            "/Subject": "Resume",
+            "/Title": title,
+            "/Subject": subject,
             "/Keywords": keywords,
             "/Creator": APP_NAME,
             "/Producer": PRODUCER,

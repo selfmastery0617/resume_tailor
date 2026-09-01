@@ -20,6 +20,7 @@ from .corpus import (
 )
 from .documents import (
     generated_documents,
+    profile_cover_letter_settings,
     profile_template_settings,
     templates,
     templates_versions,
@@ -80,6 +81,7 @@ __all__ = [
     "profile_educations",
     "profile_experiences",
     "profile_skills",
+    "profile_cover_letter_settings",
     "profile_template_settings",
     "profiles",
     "projects",

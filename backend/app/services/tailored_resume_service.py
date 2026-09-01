@@ -415,6 +415,10 @@ def _saved_documents():
         .where(
             generated_documents.c.storage_key.isnot(None),
             generated_documents.c.deleted_at.is_(None),
+            # Without this, the newest-per-job pick below could surface a
+            # cover letter row instead of the resume (both now live in this
+            # same table, told apart only by kind).
+            generated_documents.c.kind == "resume",
         )
     )
 

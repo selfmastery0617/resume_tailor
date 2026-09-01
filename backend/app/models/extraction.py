@@ -61,6 +61,11 @@ extraction_runs = Table(
     Column("search_model", Text, nullable=False, server_default=text("''")),
     # How many prompts shared this job's single chat. 0 means never connected.
     Column("provider_turns", SmallInteger, nullable=False, server_default=text("0")),
+    # Step 10's parsed <cover_letter> XML (job_title/company_name/greeting/
+    # paragraphs/closing/signature_name) -- empty when the run never reached
+    # step 10, or step 10 failed to parse (graceful degradation, same as
+    # every other step).
+    Column("cover_letter", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("started_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("finished_at", DateTime(timezone=True), nullable=True),
     Column("error", Text, nullable=True),

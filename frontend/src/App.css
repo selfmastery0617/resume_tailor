@@ -434,6 +434,28 @@
   color-scheme: light;
 }
 
+/* Same treatment for the cover letter preview -- without this white "page"
+   wrapper, the preview pane's own (possibly dark, under dark theme)
+   background showed through behind the letter's dark text, making it hard
+   to read. The letter itself is always printed on white paper, same as the
+   resume, so this pins both the background and the text colours regardless
+   of the app's theme -- not literal white text, which would make the actual
+   generated PDF unreadable (this component renders both the preview and the
+   real PDF, via PrintPage.tsx). */
+.cover-letter-page-shell {
+  display: inline-block;
+  min-width: 6in;
+  padding: 0.75in;
+  background: #ffffff;
+  box-shadow: var(--shadow-lg);
+  border-radius: 2px;
+}
+
+.cover-letter-document,
+.cover-letter-document * {
+  color-scheme: light;
+}
+
 /* Let page fragments use every available line instead of reserving the
    browser default two-line widow/orphan groups. */
 .resume-document {
@@ -1663,6 +1685,22 @@ a.experience-badge:hover { text-decoration: underline; }
 }
 
 .resume-open-folder:hover { color: var(--text-h); }
+
+/* Narrower companion to a.experience-badge, in the same cell (resume-cell) --
+   icon only, no filename, so it stays visibly shorter than the resume's own
+   badge without a separate width rule needing to fight that one's ellipsis. */
+.cover-letter-badge {
+  display: inline-block;
+  flex-shrink: 0;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  border: 1px solid rgba(62, 207, 142, 0.45);
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+.cover-letter-badge:hover { text-decoration: underline; }
 
 /* ---- jobs table ---- */
 .jobs-page {

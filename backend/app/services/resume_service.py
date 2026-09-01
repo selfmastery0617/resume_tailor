@@ -95,12 +95,18 @@ def record_document(
     byte_size: int = 0,
     page_count: int = 0,
     storage_key: str | None = None,
+    kind: str = "resume",
 ) -> UUID:
     """Write the immutable record of one generated document.
 
     generated_resumes and job_resume used to be separate tables saying
     overlapping things about the same PDF; they are one table now, told apart
-    by `kind` and by whether a storage key was written.
+    by `kind` and by whether a storage key was written. `kind="cover_letter"`
+    is the other supported value (see the DOCUMENT_KINDS / kind_known check
+    constraint on generated_documents) -- a cover letter template has no row
+    in `templates` (see cover_letter_templates/registry.py's docstring), so
+    template_uuid naturally resolves to None for one, same as it already does
+    for any templateId this lookup doesn't recognize.
     """
     from app.services import job_store
 
@@ -125,9 +131,9 @@ def record_document(
                 # resume that no listing asked for.
                 job_id=job_row.id if job_row is not None else None,
                 run_id=None,
-                kind="resume",
+                kind=kind,
                 template_id=template_uuid,
-                template_version=payload["templateVersion"],
+                template_version=payload.get("templateVersion") or 1,
                 content_snapshot=payload["data"],
                 style_snapshot=payload["style"],
                 # User templates are mutable, so pinning id+version alone would

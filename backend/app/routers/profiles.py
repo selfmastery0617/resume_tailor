@@ -1,8 +1,13 @@
 from fastapi import APIRouter, HTTPException
 
+from app.schemas.cover_letter_template import (
+    ProfileCoverLetterTemplateSettings,
+    SaveCoverLetterTemplateSettingsRequest,
+)
 from app.schemas.resume import Profile, ProfileCreate, ProfileUpdate
 from app.schemas.template import ProfileTemplateSettings, SaveTemplateSettingsRequest
-from app.services import profile_service
+from app.services import cover_letter_service, profile_service
+from app.services.cover_letter_service import CoverLetterTemplateNotFound
 from app.services.profile_service import ProfileNotFound, TemplateNotFound
 
 router = APIRouter(prefix="/api/profiles", tags=["profiles"])
@@ -106,5 +111,45 @@ def save_template_settings(profile_id: str, payload: SaveTemplateSettingsRequest
 def reset_template_settings(profile_id: str):
     try:
         return profile_service.reset_template_settings(profile_id)
+    except ProfileNotFound as exc:
+        raise _not_found("The requested profile does not exist.") from exc
+
+
+# -- cover letter template settings ----------------------------------------
+
+
+@router.get("/{profile_id}/cover-letter-template", response_model=ProfileCoverLetterTemplateSettings)
+def get_cover_letter_template_settings(profile_id: str):
+    try:
+        return cover_letter_service.get_cover_letter_template_settings(profile_id)
+    except ProfileNotFound as exc:
+        raise _not_found("The requested profile does not exist.") from exc
+
+
+@router.put("/{profile_id}/cover-letter-template", response_model=ProfileCoverLetterTemplateSettings)
+def save_cover_letter_template_settings(
+    profile_id: str, payload: SaveCoverLetterTemplateSettingsRequest
+):
+    try:
+        return cover_letter_service.save_cover_letter_template_settings(
+            profile_id, payload.templateId, payload.styleOverrides
+        )
+    except ProfileNotFound as exc:
+        raise _not_found("The requested profile does not exist.") from exc
+    except CoverLetterTemplateNotFound as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "TEMPLATE_NOT_FOUND", "message": str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail={"code": "INVALID_STYLE", "message": str(exc)}
+        ) from exc
+
+
+@router.delete("/{profile_id}/cover-letter-template", response_model=ProfileCoverLetterTemplateSettings)
+def reset_cover_letter_template_settings(profile_id: str):
+    try:
+        return cover_letter_service.reset_cover_letter_template_settings(profile_id)
     except ProfileNotFound as exc:
         raise _not_found("The requested profile does not exist.") from exc

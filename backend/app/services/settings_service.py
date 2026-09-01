@@ -2698,6 +2698,147 @@ OUTPUT RULES
 * If `backend_ready` is true, the Step 8 XML may be sent unchanged to the backend for PDF generation.
 """
 
+# The user's own OUTPUT STRUCTURE section only specified <job_title> and
+# <company_name> before cutting off, even though this same prompt's FINAL
+# VALIDATION checklist requires "body contains 3-4 concise paragraphs".
+# Completed here with <greeting>/<paragraphs>/<closing>/<signature_name> to
+# match that checklist and the COVER LETTER CONTENT section's own 3-4
+# paragraph structure -- see _parse_cover_letter_xml in experience_service.py,
+# which parses exactly this shape.
+DEFAULT_COVER_LETTER_PROMPT = """You are continuing the same resume-tailoring workflow from the previous steps in this conversation.
+
+Use all outputs already generated in this session, including:
+
+- the Job Description analysis;
+- the finalized resume content;
+- the final XML resume.
+
+Do not ask me to provide previous outputs again.
+
+TASK
+
+Generate a concise, tailored cover letter for the target job and return it in XML format.
+
+The cover letter must be fully consistent with the finalized resume.
+
+Do not invent:
+
+- experience;
+- technologies;
+- projects;
+- metrics;
+- responsibilities;
+- years of experience;
+- certifications;
+- company relationships.
+
+Use only evidence already established in the resume workflow.
+
+COVER LETTER CONTENT
+
+Write a professional cover letter with 3-4 short paragraphs.
+
+Paragraph 1:
+
+- state interest in the target role;
+- briefly summarize years of experience when supported;
+- explain the overall type of engineering work the candidate has done.
+
+Paragraph 2:
+
+- highlight the most relevant recent work;
+- explain what systems, platforms, products, or workflows the candidate built or owned;
+- connect that work naturally to the target role.
+
+Paragraph 3:
+
+- highlight another relevant area of experience, such as architecture, data pipelines, AI/ML integration, migration, reliability, leadership, or cross-functional ownership;
+- focus on project purpose and impact rather than listing technologies.
+
+Final paragraph:
+
+- briefly explain why the candidate's experience is relevant to the role;
+- express interest in discussing the opportunity.
+
+STYLE
+
+- concise and professional;
+- approximately 250-350 words;
+- natural human tone;
+- no exaggerated enthusiasm;
+- no generic filler;
+- do not repeat the resume summary word-for-word;
+- do not turn the letter into a skills list;
+- emphasize what the candidate actually built, owned, solved, and delivered;
+- use metrics selectively only when already supported by the resume;
+- avoid more than one metric in the same sentence.
+
+COMPANY / ROLE TARGETING
+
+Use the target company name and target job title when available from the Job Description.
+
+Do not invent:
+
+- hiring manager name;
+- office location;
+- company initiatives not stated in the JD;
+- company values not established in the workflow.
+
+If no hiring manager name is available, use:
+
+`Dear Hiring Manager,`
+
+XML RULES
+
+Return valid XML only.
+
+Escape XML-reserved characters in textual content:
+
+- `&` -> `&amp;`
+- `<` -> `&lt;`
+- `>` -> `&gt;`
+
+Do not double-escape already escaped entities.
+
+Do not use markdown.
+
+OUTPUT STRUCTURE
+
+Return ONLY the following XML structure. Do not include Markdown fences,
+explanations, comments, or text outside the XML.
+
+<cover_letter>
+  <job_title></job_title>
+  <company_name></company_name>
+  <greeting></greeting>
+  <paragraphs>
+    <paragraph></paragraph>
+    <paragraph></paragraph>
+    <paragraph></paragraph>
+    <paragraph></paragraph>
+  </paragraphs>
+  <closing></closing>
+  <signature_name></signature_name>
+</cover_letter>
+
+FINAL VALIDATION
+
+Before output, verify:
+
+- XML is valid and parseable;
+- there is exactly one `<cover_letter>` root;
+- target job title and company name match the JD when available;
+- cover letter facts are consistent with the finalized resume;
+- no unsupported experience or technology was added;
+- years of experience match the established resume timelines;
+- metrics, if used, match the finalized resume exactly;
+- the letter focuses on work, project purpose, ownership, and impact rather than repeating the skill set;
+- body contains 3-4 concise paragraphs;
+- no markdown or explanatory text appears outside the XML.
+
+Silently correct any violation before returning the XML.
+"""
+
 DEFAULT_SKILLS_PROMPT = """Extract the following from this job description:
 1. Main Skills - the key technical and professional skills required, as a concise comma-separated list.
 2. Job Mission - the core purpose of this role, in one sentence.
@@ -3001,8 +3142,12 @@ DEFAULTS: dict[str, Any] = {
     "resumeContentPrompt": DEFAULT_RESUME_CONTENT_PROMPT,
     # Step 8 -- see DEFAULT_FINAL_RESUME_PROMPT.
     "finalResumePrompt": DEFAULT_FINAL_RESUME_PROMPT,
-    # Step 9 -- see DEFAULT_VALIDATION_PROMPT.
+    # Step 9 -- see DEFAULT_VALIDATION_PROMPT. Currently skipped in
+    # extract_experience() (step 10 runs right after step 8), but still
+    # editable here for whenever it's re-enabled.
     "validationPrompt": DEFAULT_VALIDATION_PROMPT,
+    # Step 10 -- see DEFAULT_COVER_LETTER_PROMPT. Runs right after step 8.
+    "coverLetterPrompt": DEFAULT_COVER_LETTER_PROMPT,
     "skillsPrompt": DEFAULT_SKILLS_PROMPT,
     "tailoringPrompt": DEFAULT_TAILORING_PROMPT,
     # Step 4: a resume summary written from the bullets the pipeline just made.
@@ -3087,6 +3232,7 @@ PROMPT_KEYS: dict[str, str] = {
     "resumeContentPrompt": "resumecontent",
     "finalResumePrompt": "finalresume",
     "validationPrompt": "validation",
+    "coverLetterPrompt": "coverletter",
     "skillsPrompt": "skills",
     "tailoringPrompt": "tailoring",
     "summaryPrompt": "summary",

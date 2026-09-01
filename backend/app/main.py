@@ -11,6 +11,7 @@ from app.db import init_db
 from app.routers import (
     browser,
     chatgpt,
+    cover_letters,
     deepseek,
     experience,
     jobright,
@@ -97,6 +98,7 @@ app.include_router(browser.router)
 app.include_router(templates.router)
 app.include_router(profiles.router)
 app.include_router(resumes.router)
+app.include_router(cover_letters.router)
 app.include_router(settings.router)
 app.include_router(experience.router)
 

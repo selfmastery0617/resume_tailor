@@ -100,6 +100,21 @@ profile_template_settings = Table(
     owned_by("profiles", column="profile_id"),
 )
 
+# Cover letter templates have no renderer/layout diversity to register (see
+# app/services/cover_letter_templates/registry.py) -- every one is a named
+# style preset for a single fixed letter structure, identified by its
+# registry key directly rather than a row in `templates`/`templates_versions`.
+profile_cover_letter_settings = Table(
+    "profile_cover_letter_settings",
+    metadata,
+    Column("profile_id", UUID(as_uuid=True), primary_key=True),
+    Column("user_id", UUID(as_uuid=True), nullable=False),
+    Column("template_id", Text, nullable=False, server_default=text("'coverletter-1'")),
+    Column("style_overrides", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    owned_by("profiles", column="profile_id"),
+)
+
 generated_documents = Table(
     "generated_documents",
     metadata,
@@ -157,6 +172,7 @@ __all__ = [
     "TEMPLATE_VISIBILITY",
     "generated_documents",
     "profile_template_settings",
+    "profile_cover_letter_settings",
     "templates",
     "templates_versions",
 ]

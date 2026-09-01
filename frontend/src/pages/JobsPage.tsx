@@ -36,6 +36,7 @@ import {
   openTailoredResumeFolder,
   type TailoredResume,
 } from "../api/resumes";
+import { fetchAllTailoredCoverLetters, type TailoredCoverLetter } from "../api/coverLetters";
 import { extractExperience, fetchAllExperience, type ExperienceResult } from "../api/experience";
 import { fetchSettledChatGptSession } from "../api/chatgpt";
 import type { Job } from "../types/job";
@@ -190,6 +191,7 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [experienceResults, setExperienceResults] = useState<Record<string, ExperienceResult>>({});
   const [resumeResults, setResumeResults] = useState<Record<string, TailoredResume>>({});
+  const [coverLetterResults, setCoverLetterResults] = useState<Record<string, TailoredCoverLetter>>({});
   const [experienceExtracting, setExperienceExtracting] = useState<Map<string, number>>(new Map());
   const [resumeGenerating, setResumeGenerating] = useState<Map<string, number>>(new Map());
   const [importOpen, setImportOpen] = useState(false);
@@ -246,6 +248,11 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
       }
       try {
         setResumeResults(await fetchAllTailoredResumes());
+      } catch {
+        /* same */
+      }
+      try {
+        setCoverLetterResults(await fetchAllTailoredCoverLetters());
       } catch {
         /* same */
       }
@@ -477,6 +484,7 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
           Object.fromEntries(Object.entries(prev).filter(([id]) => !gone.has(id)));
         setExperienceResults(forget);
         setResumeResults(forget);
+        setCoverLetterResults(forget);
         gridApiRef.current?.deselectAll();
         range.clear();
         await reload();
@@ -603,6 +611,14 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
           jobTitle: job.title,
         });
         setResumeResults((prev) => ({ ...prev, [job.id]: saved }));
+        // A fresh extraction (just above, when this job had none yet) already
+        // generated a cover letter PDF automatically alongside the resume --
+        // pick that up too, so the badge doesn't wait for a full page reload.
+        try {
+          setCoverLetterResults(await fetchAllTailoredCoverLetters());
+        } catch {
+          /* badge is optional */
+        }
         // Generating one flips the row to Ready server-side.
         await reload();
         return true;
@@ -871,6 +887,7 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     experienceResults,
     resumeGenerating,
     resumeResults,
+    coverLetterResults,
     bulkRunning: bulkGenerating,
     onGenerateResume: handleGenerateResume,
     onOpenFolder: handleOpenFolder,

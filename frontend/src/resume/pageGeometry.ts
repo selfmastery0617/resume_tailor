@@ -1,4 +1,5 @@
 import { isTemplateLayoutV2, type PaperSize } from "./layoutTypes";
+import type { CoverLetterStyle } from "./coverLetterTypes";
 
 export const PAPER_OPTIONS: ReadonlyArray<{
   id: PaperSize;
@@ -53,6 +54,31 @@ export function pageGeometry(layout: unknown): PageGeometry {
   const marginBottomIn = finiteOr(page?.marginBottomIn, DEFAULT_PAGE_GEOMETRY.marginBottomIn);
   const marginLeftIn = finiteOr(page?.marginLeftIn, DEFAULT_PAGE_GEOMETRY.marginLeftIn);
   const marginRightIn = finiteOr(page?.marginRightIn, DEFAULT_PAGE_GEOMETRY.marginRightIn);
+
+  return {
+    size: paper.id,
+    widthIn: paper.widthIn,
+    heightIn: paper.heightIn,
+    marginTopIn,
+    marginBottomIn,
+    marginLeftIn,
+    marginRightIn,
+    contentWidthIn: Math.max(0.5, paper.widthIn - marginLeftIn - marginRightIn),
+    contentHeightIn: Math.max(0.5, paper.heightIn - marginTopIn - marginBottomIn),
+  };
+}
+
+/** A cover letter has no layout document at all (see CoverLetterStyle,
+ *  app/schemas/cover_letter_style.py) -- its page size and margins live
+ *  directly on the style instead, so this reads them from there rather
+ *  than from a TemplateLayoutV2's `page` block. Mirrors _page_spec's own
+ *  branch in pdf/generator.py. */
+export function coverLetterPageGeometry(style: CoverLetterStyle | undefined): PageGeometry {
+  const paper = PAPER_OPTIONS.find((candidate) => candidate.id === style?.pageSize) ?? PAPER_OPTIONS[0];
+  const marginTopIn = finiteOr(style?.marginTopIn, DEFAULT_PAGE_GEOMETRY.marginTopIn);
+  const marginBottomIn = finiteOr(style?.marginBottomIn, DEFAULT_PAGE_GEOMETRY.marginBottomIn);
+  const marginLeftIn = finiteOr(style?.marginLeftIn, DEFAULT_PAGE_GEOMETRY.marginLeftIn);
+  const marginRightIn = finiteOr(style?.marginRightIn, DEFAULT_PAGE_GEOMETRY.marginRightIn);
 
   return {
     size: paper.id,

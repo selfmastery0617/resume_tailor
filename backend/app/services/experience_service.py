@@ -1864,6 +1864,123 @@ async def _validate_final_resume(
     return parsed
 
 
+_COVER_LETTER_XML_BLOCK_RE = re.compile(
+    r"<cover_letter\b.*?</cover_letter\s*>", re.IGNORECASE | re.DOTALL
+)
+
+
+def _parse_cover_letter_xml(reply: str) -> dict[str, Any] | None:
+    """Parse step 10's <cover_letter>...</cover_letter> XML reply.
+
+    Schema (DEFAULT_COVER_LETTER_PROMPT's own OUTPUT STRUCTURE section only
+    covered job_title/company_name; completed from its FINAL VALIDATION
+    checklist -- "body contains 3-4 concise paragraphs" -- see
+    settings_service.py's docstring on DEFAULT_COVER_LETTER_PROMPT):
+
+        <cover_letter>
+          <job_title></job_title>
+          <company_name></company_name>
+          <greeting></greeting>
+          <paragraphs>
+            <paragraph></paragraph>
+            ...
+          </paragraphs>
+          <closing></closing>
+          <signature_name></signature_name>
+        </cover_letter>
+
+    Returns None on any parse failure -- no XML block found, malformed XML,
+    or no paragraphs at all -- so the caller can log the raw reply and
+    degrade gracefully like every other step.
+    """
+    match = _COVER_LETTER_XML_BLOCK_RE.search(reply or "")
+    if not match:
+        return None
+    try:
+        root = ET.fromstring(_BARE_AMPERSAND_RE.sub("&amp;", match.group(0)))
+    except ET.ParseError:
+        return None
+
+    paragraphs_el = root.find("paragraphs")
+    paragraphs = (
+        [_xml_text(p) for p in paragraphs_el.findall("paragraph") if _xml_text(p)]
+        if paragraphs_el is not None
+        else []
+    )
+    if not paragraphs:
+        return None
+
+    return {
+        "job_title": _xml_text(root.find("job_title")),
+        "company_name": _xml_text(root.find("company_name")),
+        "greeting": _xml_text(root.find("greeting")) or "Dear Hiring Manager,",
+        "paragraphs": paragraphs,
+        "closing": _xml_text(root.find("closing")) or "Sincerely,",
+        "signature_name": _xml_text(root.find("signature_name")),
+    }
+
+
+async def _generate_cover_letter(
+    chat: "ChatGPTConversation | None",
+) -> dict[str, Any] | None:
+    """New pipeline architecture, step 10: writes a tailored cover letter
+    grounded in the finalized resume -- see DEFAULT_COVER_LETTER_PROMPT.
+
+    No job_description or other substitution, and no data re-injected: a
+    pure conversation follow-up, same as every step since step 5 -- step 8
+    ran in this chat, so the finalized resume content the letter must stay
+    consistent with is already in the model's own context. Step 9
+    (validation) is skipped, so this runs right after step 8.
+
+    Returns None when chat is None, the call fails, or the reply's XML
+    doesn't parse (see _parse_cover_letter_xml) -- logged either way, never
+    raised, matching every other step's graceful-degradation rule.
+    """
+    if chat is None:
+        return None
+
+    from app.services import settings_service
+
+    template = (settings_service.get_settings().get("coverLetterPrompt") or "").strip()
+    if not template:
+        template = settings_service.DEFAULT_COVER_LETTER_PROMPT
+
+    progress.emit(
+        "coverletter",
+        "Writing a tailored cover letter…",
+        level="step",
+    )
+
+    try:
+        reply = await chat.ask(template)
+    except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
+        progress.emit(
+            "coverletter",
+            f"Cover letter generation failed ({_exc_label(exc)})",
+            level="warn",
+        )
+        return None
+
+    parsed = _parse_cover_letter_xml(reply)
+    if parsed is None:
+        progress.emit(
+            "coverletter",
+            "ChatGPT's reply did not parse as the expected <cover_letter> XML",
+            level="warn",
+            preview=reply,
+        )
+        return None
+
+    progress.emit(
+        "coverletter",
+        f"Wrote a cover letter for {parsed.get('company_name', '?') or 'the target role'} — "
+        f"{len(parsed.get('paragraphs') or [])} paragraphs",
+        level="result",
+        preview=json.dumps(parsed, indent=2, ensure_ascii=False),
+    )
+    return parsed
+
+
 _EXTRACTION_XML_RE = re.compile(r"<extraction\b.*?</extraction\s*>", re.IGNORECASE | re.DOTALL)
 
 
@@ -3218,16 +3335,24 @@ async def extract_experience(
         )
 
         # Step 9 (validation) is skipped for now: go straight from step 8's
-        # XML to the resume this function returns, rather than stopping
-        # short of it like every step above did. Re-enable with
-        # `await _validate_final_resume(chat)` here, right after step 8,
-        # once something downstream is ready to act on backend_ready/
-        # blocking_issues rather than just logging them to the console.
+        # XML to step 10, rather than stopping short of it like every step
+        # above did. Re-enable with `await _validate_final_resume(chat)`
+        # here, right after step 8, once something downstream is ready to
+        # act on backend_ready/blocking_issues rather than just logging
+        # them to the console.
         if final_resume is None:
             raise ExperienceExtractionError(
                 "Extraction did not produce a final resume -- see the "
                 "console panel for the step where it stopped."
             )
+
+        # Step 10: write a tailored cover letter grounded in the finalized
+        # resume -- still in this same chat. Only worth asking once step 8
+        # has actually produced the resume to stay consistent with. Unlike
+        # final_resume, a missing cover letter does not fail the whole
+        # extraction -- it degrades to "no cover letter yet", same as every
+        # other step's own graceful-degradation rule.
+        cover_letter = await _generate_cover_letter(chat)
 
         turns = chat.turns if chat else 0
 
@@ -3298,6 +3423,7 @@ async def extract_experience(
         "skillSet": skill_set_flat,
         "skillSetSource": "chatgpt",
         "skillGroups": [{"category": c, "skills": s} for c, s in skill_groups_final],
+        "coverLetter": cover_letter or {},
         "search": vector_search.backend(),
         "generator": "chatgpt",
         "deepseekTurns": turns,
@@ -3353,6 +3479,7 @@ def _store_run(conn, job_row, payload: dict[str, Any]) -> None:
             search_mode=search.get("mode") or "lexical",
             search_model=search.get("model") or "",
             provider_turns=int(payload.get("deepseekTurns") or 0),
+            cover_letter=payload.get("coverLetter") or {},
             finished_at=func.now(),
         )
         .returning(extraction_runs.c.id)
@@ -3449,6 +3576,7 @@ def _load_run(conn, job_row) -> dict[str, Any] | None:
                    "detail": None},
         "generator": run.generator,
         "deepseekTurns": run.provider_turns,
+        "coverLetter": run.cover_letter or {},
         "extractedAt": run.finished_at.isoformat() if run.finished_at else "",
     }
 
