@@ -150,16 +150,25 @@ export function SettingsPage({ onProviderSignedOut }: SettingsPageProps) {
             onSignedIn={onProviderSignedOut}
             onSignedOut={onProviderSignedOut}
           />
-          <ProviderConnect
-            key="chatgpt"
-            provider="chatgpt"
-            label="ChatGPT"
-            description="Alternative model for generating tailored resumes and cover letters."
-            fetchSession={fetchSettledChatGptSession}
-            signOut={signOutChatGpt}
-            onSignedIn={onProviderSignedOut}
-            onSignedOut={onProviderSignedOut}
-          />
+          {Array.from({ length: Math.max(1, Number(draft.chatGptWorkerCount) || 1) }, (_, i) => i + 1).map(
+            (worker) => (
+              <ProviderConnect
+                key={`chatgpt-${worker}`}
+                provider="chatgpt"
+                worker={worker}
+                label={`ChatGPT (Worker ${worker})`}
+                description={
+                  worker === 1
+                    ? "Alternative model for generating tailored resumes and cover letters."
+                    : "Extra session so bulk extraction can run this row alongside others, instead of queueing behind them."
+                }
+                fetchSession={() => fetchSettledChatGptSession(false, worker)}
+                signOut={() => signOutChatGpt(worker)}
+                onSignedIn={onProviderSignedOut}
+                onSignedOut={onProviderSignedOut}
+              />
+            ),
+          )}
         </div>
 
         <div className="style-row" style={{ maxWidth: 420 }}>
@@ -176,6 +185,29 @@ export function SettingsPage({ onProviderSignedOut }: SettingsPageProps) {
               <option value="chatgpt">ChatGPT</option>
             </select>
           </div>
+        </div>
+
+        <div className="style-row" style={{ maxWidth: 420 }}>
+          <label htmlFor="chatgpt-worker-count" className="style-label">
+            Concurrent ChatGPT sessions for bulk extraction
+          </label>
+          <div className="style-control">
+            <select
+              id="chatgpt-worker-count"
+              value={draft.chatGptWorkerCount}
+              onChange={(event) => update("chatGptWorkerCount", event.target.value)}
+            >
+              <option value="1">1 (no concurrency)</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+            </select>
+          </div>
+          <p className="notice">
+            Each worker above 1 needs its own one-time sign-in (same ChatGPT
+            account, separate browser profile) using the cards above. Raising
+            this saves and takes effect immediately — no restart needed.
+          </p>
         </div>
       </section>
 

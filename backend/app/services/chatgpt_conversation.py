@@ -24,7 +24,8 @@ import asyncio
 import queue
 import threading
 from concurrent.futures import Future
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 from . import chatgpt as chatgpt_mod
 from .chatgpt import CHATGPT_ORIGIN, PAGE_LOAD_TIMEOUT_MS, ChatGPTError
@@ -38,15 +39,25 @@ _SHUTDOWN = object()
 class ChatGPTConversation:
     """One open chat. Call `start()`, then `ask()` repeatedly, then `close()`."""
 
-    def __init__(self, headless: bool | None = None) -> None:
+    def __init__(self, headless: bool | None = None, profile_dir: Path | None = None) -> None:
         self.headless = (
             chatgpt_mod._env_flag("CHATGPT_HEADLESS", True) if headless is None else headless
         )
+        # None -> browser_context()'s own default (the original shared
+        # profile). Passed explicitly by chatgpt_pool-aware callers so
+        # concurrent conversations each get their own Chromium profile
+        # directory instead of contending for one -- see chatgpt_pool.py.
+        self.profile_dir = profile_dir
 
         self._requests: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
         self._ready: Future = Future()
         self.turns = 0
+        # Set from the worker thread before self._ready resolves, so a
+        # caller can log it right after a successful start() -- see
+        # chatgpt.ensure_new_chat()'s docstring for why this is worth
+        # surfacing rather than silently swallowing.
+        self.had_stale_history = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -77,13 +88,18 @@ class ChatGPTConversation:
 
     # -- prompting ---------------------------------------------------------
 
-    async def ask(self, message: str) -> str:
-        """Send one more message into the open chat and return the reply."""
+    async def ask(self, message: str, is_complete: "Callable[[str], bool] | None" = None) -> str:
+        """Send one more message into the open chat and return the reply.
+
+        `is_complete`, if given, is passed straight through to
+        read_reply_since() -- see its docstring for why a plain stability
+        check alone isn't always enough for a large, structured reply.
+        """
         if self._thread is None or not self._thread.is_alive():
             raise ChatGPTError("The ChatGPT chat session is not running.")
 
         future: Future = Future()
-        self._requests.put((message, future))
+        self._requests.put((message, is_complete, future))
         reply = await asyncio.wrap_future(future)
         self.turns += 1
         return reply
@@ -94,7 +110,9 @@ class ChatGPTConversation:
         from app.services.deepseek import browser as browser_mod
 
         try:
-            with browser_mod.browser_context(headless=self.headless) as context:
+            with browser_mod.browser_context(
+                headless=self.headless, profile_dir=self.profile_dir
+            ) as context:
                 page = browser_mod.first_page(context)
                 page.goto(
                     CHATGPT_ORIGIN,
@@ -102,6 +120,7 @@ class ChatGPTConversation:
                     wait_until="domcontentloaded",
                 )
                 chatgpt_mod.assert_logged_in(page)
+                self.had_stale_history = chatgpt_mod.ensure_new_chat(page)
 
                 if not self._ready.done():
                     self._ready.set_result(None)
@@ -117,12 +136,32 @@ class ChatGPTConversation:
             self._drain(ChatGPTError("The ChatGPT chat session closed."))
 
     def _serve(self, page: Any) -> None:
+        # True once a turn has actually gotten a confirmed reply -- from
+        # then on, a bubble count of exactly zero means the chat was reset
+        # out from under this session (see the check below), not virtualiser
+        # drift, which only ever thins older bubbles, never all the way to
+        # zero (the newest bubble always stays mounted).
+        turn_confirmed = False
         while True:
             item = self._requests.get()
             if item is _SHUTDOWN:
                 return
-            message, future = item
+            message, is_complete, future = item
             try:
+                if turn_confirmed and chatgpt_mod.bubble_count(page) == 0:
+                    # ensure_new_chat() only guards the very first message --
+                    # this catches the chat losing its history *later*, e.g.
+                    # ChatGPT's own client silently dropping back to a blank
+                    # composer during a long reasoning-model wait. Sending
+                    # this turn's prompt into that would silently discard
+                    # every earlier turn's context instead of failing loud.
+                    raise ChatGPTError(
+                        "This chat's history just disappeared -- it had at "
+                        "least one confirmed reply a moment ago and now "
+                        "shows none. Sending the next prompt into what "
+                        "looks like a reset chat would silently lose every "
+                        "earlier turn's context."
+                    )
                 # Text of the reply on screen before sending is how this
                 # turn's answer gets told apart from the previous one --
                 # NOT a bubble count (what ask_chained_turns() uses for its
@@ -132,8 +171,11 @@ class ChatGPTConversation:
                 # of only ever growing. See read_reply_since()'s docstring.
                 previous = chatgpt_mod.reply_text(page)
                 chatgpt_mod.send_message(page, message)
-                reply = chatgpt_mod.read_reply_since(page, previous=previous)
+                reply = chatgpt_mod.read_reply_since(
+                    page, previous=previous, is_complete=is_complete
+                )
                 future.set_result(reply)
+                turn_confirmed = True
             except BaseException as exc:  # noqa: BLE001 - one turn, one failure
                 # A failed turn should not tear down the chat: the caller can
                 # fall back for that step and still use the session for the next.
@@ -148,6 +190,6 @@ class ChatGPTConversation:
                 return
             if item is _SHUTDOWN:
                 continue
-            _message, future = item
+            _message, _is_complete, future = item
             if not future.done():
                 future.set_exception(exc)

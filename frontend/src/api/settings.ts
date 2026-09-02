@@ -71,6 +71,11 @@ export interface AppSettings {
   corpusPrompt: string;
   outputFolder: string;
   generationModel: GenerationModel;
+  /** How many ChatGPT worker profiles bulk extraction runs concurrently
+   *  ("1" to "4", stored as text like every other numeric setting). Worker 1
+   *  is always the existing signed-in profile; workers above that each need
+   *  their own one-time manual sign-in on the Settings page. */
+  chatGptWorkerCount: string;
   /** Company used as Job 1 (the earlier role) in experience extraction. */
   firstCompany: string;
   /** The first company's years. Job 1 runs start->end and Job 2 runs

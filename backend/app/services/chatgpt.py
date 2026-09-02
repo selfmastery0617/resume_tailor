@@ -54,12 +54,26 @@ CHAT_INPUT_SELECTOR = '#prompt-textarea[contenteditable="true"]'
 # if this doesn't work either, rather than trusting it blindly.
 SEND_BUTTON_SELECTOR = '[data-testid="send-button"], button[aria-label="Send prompt"]'
 
-# Verified the same session: this is the assistant reply container, and each
-# ask() call opens a brand-new chat (bare https://chatgpt.com always lands on
-# an empty composer, never a restored conversation), so unlike DeepSeek there
-# is never a previous turn's reply still on screen to tell apart from a new
-# one — read_reply() only needs "has anything appeared yet".
+# Verified the same session: this is the assistant reply container. Bare
+# https://chatgpt.com was long assumed to always land on an empty composer,
+# never a restored conversation -- true for years against the one original
+# shared profile, but observed to NOT hold on a freshly created worker
+# profile (see chatgpt_pool.py): its tab landed on an existing conversation
+# instead, so a later step's prompt became that chat's first-ever message
+# with none of the earlier turns actually present. ensure_new_chat() now
+# checks this rather than trusting it, so read_reply()/read_reply_since()
+# can still assume "has anything appeared yet" / "changed since baseline"
+# is enough -- there is never a genuine previous turn on screen by the time
+# they run, because ensure_new_chat() already ruled that out.
 ASSISTANT_MESSAGE_SELECTOR = '[data-message-author-role="assistant"]'
+
+# Best-effort corrective click if ensure_new_chat() finds the page not
+# actually blank -- keyboard shortcut below is the primary mechanism, this
+# is only the fallback, so exact selector drift here is not fatal on its own.
+NEW_CHAT_SELECTOR = (
+    'a[data-testid="create-new-chat-button"], '
+    'button[aria-label="New chat"], a[aria-label="New chat"]'
+)
 
 LOGIN_URL_MARKERS = ("/auth/login", "/log-in", "auth.openai.com")
 
@@ -115,6 +129,7 @@ __all__ = [
     "ASSISTANT_MESSAGE_SELECTOR",
     "is_signed_in",
     "has_session_cookie",
+    "ensure_new_chat",
     "ask",
     "ask_chained_turns",
     "ChatGPTError",
@@ -199,6 +214,50 @@ def assert_logged_in(page: Any) -> None:
                 "Settings; if it persists, set CHATGPT_HEADLESS=false in backend/.env."
             )
         page.wait_for_timeout(int(LOGIN_CHECK_POLL_S * 1000))
+
+
+def ensure_new_chat(page: Any) -> bool:
+    """Guard against landing on an existing conversation instead of a blank one.
+
+    See ASSISTANT_MESSAGE_SELECTOR's comment above: navigating to
+    CHATGPT_ORIGIN was assumed to always produce an empty composer, but that
+    was not actually re-checked at runtime, and it was observed to not hold
+    on a freshly created worker profile. Steps beyond the first depend on
+    everything said earlier in THIS SAME chat still being there -- if the
+    page is not genuinely blank, that context is either missing or belongs
+    to an unrelated previous conversation, so raise rather than silently
+    press on into a chat that would make replies look disconnected and
+    generic with no visible error pointing at why.
+
+    Returns True if the page had to be cleared (worth logging -- a caller
+    that has somewhere to report it, e.g. the progress log, should say so,
+    since this is exactly the condition that produced a real, hard-to-
+    diagnose bug once already).
+    """
+    page.wait_for_timeout(300)
+    if bubble_count(page) == 0:
+        return False
+
+    # Ctrl+Shift+O is ChatGPT's own documented "start new chat" shortcut --
+    # more durable than guessing at a button selector, tried first.
+    page.keyboard.press("Control+Shift+O")
+    page.wait_for_timeout(500)
+    if bubble_count(page) == 0:
+        return True
+
+    new_chat_button = page.locator(NEW_CHAT_SELECTOR).first
+    if new_chat_button.count() > 0:
+        new_chat_button.click(timeout=10_000)
+        page.wait_for_timeout(500)
+
+    if bubble_count(page) != 0:
+        raise ChatGPTError(
+            "Landed on an existing ChatGPT conversation instead of a new, "
+            "empty one, and could not clear it. Refusing to continue -- "
+            "sending this job's prompts into the wrong chat would silently "
+            "produce disconnected, out-of-context replies."
+        )
+    return True
 
 
 def _notify_input_changed(chat_input: Any) -> None:
@@ -387,7 +446,11 @@ def read_reply(page: Any, after: int = 0) -> str:
     return last_text
 
 
-def read_reply_since(page: Any, previous: str | None = None) -> str:
+def read_reply_since(
+    page: Any,
+    previous: str | None = None,
+    is_complete: "Callable[[str], bool] | None" = None,
+) -> str:
     """Wait for the streamed reply to settle, then return its text.
 
     Text-diffing, not bubble-count-based like read_reply() above: ChatGPT's
@@ -406,6 +469,22 @@ def read_reply_since(page: Any, previous: str | None = None) -> str:
     virtualisation is unlikely to have kicked in. This is for
     ChatGPTConversation, which can run many more sequential turns in one
     chat over the course of a whole extraction (see chatgpt_conversation.py).
+
+    `is_complete`, if given, is an extra gate on top of the stability check:
+    even once the text stops growing for STABILITY_QUIET_PERIOD_S, a reply
+    is only accepted once is_complete(text) is also true. Plain stability
+    alone can't tell "the reply actually finished" from "streaming paused
+    for a couple of seconds mid-reply" -- observed directly running two
+    ChatGPT sessions concurrently (see chatgpt_pool.py): a large XML reply
+    (step 8's whole formatted resume) stopped growing for over 2s mid-
+    document, got accepted as done, and the truncated tail (missing its
+    closing tags) failed to parse. Pass a callback that checks for whatever
+    marks a *genuinely* finished reply (e.g. its closing root tag) for any
+    caller expecting a large, structured reply; leave it None (today's
+    behavior, unchanged) for callers where that's not easy to check for.
+    Only gates the stability-based early return -- the REPLY_TOTAL_TIMEOUT_S
+    fallback below still returns whatever partial text exists rather than
+    losing it outright, complete-looking or not.
     """
     started_at = time.monotonic()
     baseline = (previous or "").strip()
@@ -435,6 +514,7 @@ def read_reply_since(page: Any, previous: str | None = None) -> str:
             len(last_text) >= MIN_STABLE_REPLY_CHARS
             and last_text != baseline
             and time.monotonic() - last_change_at >= STABILITY_QUIET_PERIOD_S
+            and (is_complete is None or is_complete(last_text))
         ):
             break
 
@@ -473,6 +553,7 @@ def _ask_sync(message: str, headless: bool) -> str:
             CHATGPT_ORIGIN, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until="domcontentloaded"
         )
         assert_logged_in(page)
+        ensure_new_chat(page)
         send_message(page, message)
         return read_reply(page)
 
@@ -507,6 +588,7 @@ def _ask_chained_turns_sync(
             CHATGPT_ORIGIN, timeout=PAGE_LOAD_TIMEOUT_MS, wait_until="domcontentloaded"
         )
         assert_logged_in(page)
+        ensure_new_chat(page)
         send_message(page, first_message)
         replies = [read_reply(page)]
 

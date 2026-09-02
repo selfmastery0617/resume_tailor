@@ -1,9 +1,12 @@
 """The ChatGPT session: checking it, and signing out.
 
-Lives in the one profile shared with DeepSeek and Jobright — see
-deepseek/browser.py. Checking is a live probe rather than a file inspection:
-cookies expire, and a card that reads "Connected" on the strength of a file on
-disk is exactly how a session goes stale without anyone noticing.
+Lives in the profile shared with DeepSeek and Jobright by default -- see
+deepseek/browser.py -- but every function here takes a `profile_dir` so a
+ChatGPT worker's own profile (see chatgpt_pool.py) can be checked/signed out
+independently of Worker 1's. Checking is a live probe rather than a file
+inspection: cookies expire, and a card that reads "Connected" on the strength
+of a file on disk is exactly how a session goes stale without anyone
+noticing.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 from app.services.chatgpt import (
@@ -36,8 +40,17 @@ LOGIN_URL_MARKERS = ("/auth/login", "/log-in", "auth.openai.com")
 COOKIE_DOMAIN = re.compile(r"chatgpt\.com|openai\.com")
 _TAB_PATTERN = re.compile(r"chatgpt\.com|openai\.com")
 
-_cache: dict[str, Any] = {"checked_at": 0.0, "result": None}
-_lock = asyncio.Lock()
+# Keyed by profile dir so Worker 1 and Worker 2+'s cached verdicts (and their
+# in-flight probe locks) never clobber each other.
+_states: dict[Path, dict[str, Any]] = {}
+
+
+def _state_for(profile_dir: Path) -> dict[str, Any]:
+    state = _states.get(profile_dir)
+    if state is None:
+        state = {"checked_at": 0.0, "result": None, "lock": asyncio.Lock()}
+        _states[profile_dir] = state
+    return state
 
 
 class SignOutBlocked(RuntimeError):
@@ -61,18 +74,19 @@ def _diagnose_live_page(page: Any) -> dict[str, Any]:
     }
 
 
-def invalidate() -> None:
+def invalidate(profile_dir: Path = PROFILE_DIR) -> None:
     """Drop the cached verdict, e.g. straight after a sign-in or sign-out."""
-    _cache["checked_at"] = 0.0
-    _cache["result"] = None
+    state = _state_for(profile_dir)
+    state["checked_at"] = 0.0
+    state["result"] = None
 
 
-def _probe_sync() -> dict[str, Any]:
-    """Load ChatGPT in the shared profile and report whether it still works."""
+def _probe_sync(profile_dir: Path) -> dict[str, Any]:
+    """Load ChatGPT in `profile_dir` and report whether it still works."""
     from app.services.deepseek import browser as browser_mod
 
     with browser_mod.browser_context(
-        headless=True, profile_dir=PROFILE_DIR, lock_timeout=PROFILE_LOCK_TIMEOUT_S
+        headless=True, profile_dir=profile_dir, lock_timeout=PROFILE_LOCK_TIMEOUT_S
     ) as context:
         page = browser_mod.first_page(context)
         # domcontentloaded, not "load": ChatGPT holds connections open, so
@@ -105,21 +119,24 @@ def _probe_sync() -> dict[str, Any]:
         return {"connected": True, "detail": "Signed in to ChatGPT.", "verified": True}
 
 
-async def verify_session(force: bool = False) -> dict[str, Any]:
-    """Whether the stored ChatGPT session actually works right now."""
+async def verify_session(profile_dir: Path = PROFILE_DIR, force: bool = False) -> dict[str, Any]:
+    """Whether the stored ChatGPT session in `profile_dir` actually works right now."""
     from app.services.deepseek import browser as browser_mod
+    from app.services.shared_browser import get_shared_browser
 
-    # If the shared sign-in window is open with a ChatGPT tab, read it
+    state = _state_for(profile_dir)
+
+    # If that profile's sign-in window is open with a ChatGPT tab, read it
     # directly rather than launching a second, competing instance against the
     # same profile — that would just queue behind the lock the open window
     # already holds, so a sign-in the user just finished would never be seen
     # until they closed the window.
-    from app.services.shared_browser import shared_browser
+    shared_browser = get_shared_browser(profile_dir)
 
     live = shared_browser.check_page(_TAB_PATTERN, _diagnose_live_page)
     if live is not None:
         if live["signed_in"]:
-            invalidate()
+            invalidate(profile_dir)
             return {
                 "connected": True,
                 "detail": "Signed in to ChatGPT.",
@@ -148,7 +165,7 @@ async def verify_session(force: bool = False) -> dict[str, Any]:
     # different provider's sign-in was up. Answer from the last probe instead
     # of waiting on a lock that will not free up until that window closes.
     if shared_browser.is_open():
-        cached = _cache["result"]
+        cached = state["result"]
         if cached is not None:
             return {**cached, "cached": True, "signingIn": False}
         return {
@@ -159,10 +176,10 @@ async def verify_session(force: bool = False) -> dict[str, Any]:
             "signingIn": False,
         }
 
-    # An empty shared profile means nothing is signed in to anything, so there
-    # is no point paying for a browser launch just to confirm that.
-    if not browser_mod.profile_exists(PROFILE_DIR):
-        invalidate()
+    # An empty profile means nothing is signed in to anything, so there is no
+    # point paying for a browser launch just to confirm that.
+    if not browser_mod.profile_exists(profile_dir):
+        invalidate(profile_dir)
         return {
             "connected": False,
             "detail": "Not signed in to ChatGPT.",
@@ -171,14 +188,14 @@ async def verify_session(force: bool = False) -> dict[str, Any]:
             "signingIn": False,
         }
 
-    async with _lock:
-        cached = _cache["result"]
-        fresh = time.monotonic() - _cache["checked_at"] < CACHE_TTL_SECONDS
+    async with state["lock"]:
+        cached = state["result"]
+        fresh = time.monotonic() - state["checked_at"] < CACHE_TTL_SECONDS
         if cached is not None and fresh and not force:
             return {**cached, "cached": True, "signingIn": False}
 
         try:
-            result = await asyncio.to_thread(_probe_sync)
+            result = await asyncio.to_thread(_probe_sync, profile_dir)
         except browser_mod.ProfileBusy as exc:
             # Transient, not a verdict — the shared sign-in window or an
             # extraction has the profile right now. Skip the cache so the next
@@ -203,28 +220,29 @@ async def verify_session(force: bool = False) -> dict[str, Any]:
                 "verified": False,
             }
 
-        _cache["result"] = result
-        _cache["checked_at"] = time.monotonic()
+        state["result"] = result
+        state["checked_at"] = time.monotonic()
         return {**result, "cached": False, "signingIn": False}
 
 
-def sign_out() -> dict[str, Any]:
-    """Forget ChatGPT's cookies from the shared profile.
+def sign_out(profile_dir: Path = PROFILE_DIR) -> dict[str, Any]:
+    """Forget ChatGPT's cookies from `profile_dir`.
 
     Origin-scoped, not a directory delete: the profile also holds DeepSeek's
-    and Jobright's sessions, so wiping the whole thing would sign them out too.
-    Signs out of the app, not out of ChatGPT — the account is untouched.
+    and Jobright's sessions (for Worker 1's profile), so wiping the whole
+    thing would sign them out too. Signs out of the app, not out of ChatGPT —
+    the account is untouched.
     """
     from app.services.deepseek import browser as browser_mod
 
     try:
         browser_mod.clear_origin_cookies(
-            COOKIE_DOMAIN, PROFILE_DIR, lock_timeout=PROFILE_LOCK_TIMEOUT_S
+            COOKIE_DOMAIN, profile_dir, lock_timeout=PROFILE_LOCK_TIMEOUT_S
         )
     except browser_mod.ProfileBusy as exc:
         raise SignOutBlocked(str(exc)) from exc
 
-    invalidate()
+    invalidate(profile_dir)
     return {
         "connected": False,
         "detail": "Signed out. Sign in again when you need ChatGPT.",

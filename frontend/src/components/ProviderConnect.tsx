@@ -42,6 +42,10 @@ function describeReachError(err: unknown, label: string): string {
 
 interface ProviderConnectProps {
   provider: SignInProvider;
+  /** Only meaningful for provider="chatgpt" — which worker profile's sign-in
+   *  window to open (see chatgpt_pool.py). Defaults to 1, the original
+   *  profile every other provider effectively always uses. */
+  worker?: number;
   label: string;
   description: string;
   fetchSession: () => Promise<SessionStatus>;
@@ -59,6 +63,7 @@ interface ProviderConnectProps {
 
 export function ProviderConnect({
   provider,
+  worker = 1,
   label,
   description,
   fetchSession,
@@ -113,7 +118,7 @@ export function ProviderConnect({
     setError(null);
     setOpening(true);
     try {
-      await openSignInTab(provider);
+      await openSignInTab(provider, worker);
     } catch (err) {
       setError(describeReachError(err, label));
       setOpening(false);
