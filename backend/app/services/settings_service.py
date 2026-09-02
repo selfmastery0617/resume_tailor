@@ -3172,6 +3172,12 @@ DEFAULTS: dict[str, Any] = {
     "outputFolder": "",
     # Which signed-in provider Phase 5 uses to generate content.
     "generationModel": "deepseek",
+    # How many ChatGPT worker profiles bulk extraction runs concurrently --
+    # account-wide, not profile-scoped (it's about browser sessions, not
+    # resume data). Worker 1 is always the existing signed-in profile;
+    # workers above that each need their own one-time manual sign-in. See
+    # chatgpt_pool.py.
+    "chatGptWorkerCount": "2",
     # Company used as Job 1 (the earlier role) in experience extraction.
     # Scoped to a profile, not the user: each profile has its own corpus, so a
     # company valid for one is meaningless for another.
@@ -3319,6 +3325,14 @@ def validate_settings(patch: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(
                     f"generationModel must be one of {', '.join(ALLOWED_MODELS)}"
                 )
+        elif key == "chatGptWorkerCount":
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                raise ValueError("chatGptWorkerCount must be a whole number.")
+            if not 1 <= count <= 4:
+                raise ValueError("chatGptWorkerCount must be between 1 and 4.")
+            value = str(count)
         elif key == "outputFolder":
             if value:
                 path = Path(str(value)).expanduser()

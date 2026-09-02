@@ -39,6 +39,7 @@ import {
 import { fetchAllTailoredCoverLetters, type TailoredCoverLetter } from "../api/coverLetters";
 import { extractExperience, fetchAllExperience, type ExperienceResult } from "../api/experience";
 import { fetchSettledChatGptSession } from "../api/chatgpt";
+import { fetchSettings } from "../api/settings";
 import type { Job } from "../types/job";
 import { UrlCellRenderer } from "../components/UrlCellRenderer";
 import { ResumeCellRenderer, type ResumeGridContext } from "../components/ResumeCellRenderer";
@@ -648,12 +649,14 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
   const [bulkGenerating, setBulkGenerating] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
 
-  // Jobs cannot extract/generate concurrently — the DeepSeek/ChatGPT browser
-  // session is one shared profile with a single lock, so a second job's
-  // request would just queue silently behind the first anyway. Running them
-  // one at a time here, instead of firing them all at once, keeps the UI's
-  // per-row "Extracting…"/"Generating…" state honest about what is actually
-  // in flight right now.
+  // ChatGPT bulk extraction runs on a small pool of independent worker
+  // profiles now (see chatgpt_pool.py) rather than one shared, single-lock
+  // browser session, so up to chatGptWorkerCount jobs can genuinely run at
+  // once instead of queueing behind each other. Sized from settings at call
+  // time (not a fixed constant) so raising the worker count takes effect on
+  // the next click, no reload needed; falls back to sequential (1) if
+  // settings can't be reached rather than guessing a higher number that
+  // might overrun what's actually configured.
   const generateSelectedResumes = useCallback(async () => {
     const ids = new Set(selectedIds);
     const targets = jobs.filter((job) => ids.has(job.id));
@@ -664,12 +667,28 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
     setNotice(null);
     setBulkProgress({ done: 0, total: targets.length });
 
+    let workerCount = 1;
+    try {
+      workerCount = Math.max(1, Number((await fetchSettings()).chatGptWorkerCount) || 1);
+    } catch {
+      // Settings unreachable -- fall back to the always-safe sequential path
+      // rather than guessing a concurrency level that might not be real.
+    }
+
     const failed: string[] = [];
-    for (const job of targets) {
+    let nextIndex = 0;
+    const runOne = async (): Promise<void> => {
+      const index = nextIndex++;
+      if (index >= targets.length) return;
+      const job = targets[index];
       const ok = await handleGenerateResume(job);
       if (!ok) failed.push(job.title || job.company || job.id);
       setBulkProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
-    }
+      return runOne();
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(workerCount, targets.length) }, () => runOne()),
+    );
 
     setBulkGenerating(false);
     setBulkProgress(null);

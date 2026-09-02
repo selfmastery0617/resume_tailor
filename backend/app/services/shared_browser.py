@@ -1,16 +1,24 @@
-"""The one visible browser window every provider's sign-in shares.
+"""The one visible browser window each profile's sign-in uses.
 
-Clicking "sign in" for DeepSeek, ChatGPT or Jobright opens a new tab in this
-SAME window rather than a separate one per provider — and because they share
-one profile, a session signed into here is exactly the session extraction
-reads afterward. There is only ever one browser to keep straight, and nothing
-to launch or attach beforehand: the first sign-in click starts it.
+Clicking "sign in" for DeepSeek, ChatGPT or Jobright opens a new tab in the
+SAME window as any other sign-in for that same profile, rather than a
+separate one per provider — and because they share one profile, a session
+signed into here is exactly the session extraction reads afterward. There is
+only ever one browser per profile to keep straight, and nothing to launch or
+attach beforehand: the first sign-in click starts it.
+
+Multiple ChatGPT worker profiles (see chatgpt_pool.py) each get their own
+SharedBrowser instance, keyed by profile directory via get_shared_browser()
+below -- signing into Worker 2 must open a window against Worker 2's own
+profile, not Worker 1's. `shared_browser` (the module-level name every
+existing caller already imports) stays the original single instance for the
+original shared profile, so nothing outside this file needs to change.
 
 Bounded, not persistent: it closes itself once every tab it opened has been
 closed (sign-in finished, or the user just closed the window), so it does not
-sit holding the shared profile lock indefinitely and blocking extraction that
-uses the same profile. A hard cap closes it eventually even if that heuristic
-is ever wrong.
+sit holding its profile's lock indefinitely and blocking extraction that uses
+the same profile. A hard cap closes it eventually even if that heuristic is
+ever wrong.
 
 Playwright's sync objects are thread-affine, so one dedicated worker thread
 owns the browser and everything else talks to it through a queue — the same
@@ -26,7 +34,10 @@ import re
 import threading
 import time
 from concurrent.futures import Future
+from pathlib import Path
 from typing import Any, Callable
+
+from app.services.deepseek.browser import PROFILE_DIR
 
 # How long with no open tabs and nothing pending before the window closes
 # itself. Short: once every sign-in tab is closed there is nothing left to do,
@@ -74,9 +85,12 @@ def _read_cookies(domain: re.Pattern[str]) -> Callable[[Any], list[dict[str, Any
 
 
 class SharedBrowser:
-    """One shared, visible, lazily-launched browser window."""
+    """One shared, visible, lazily-launched browser window for one profile."""
 
-    def __init__(self) -> None:
+    def __init__(self, profile_dir: Path | None = None) -> None:
+        # None -> browser_context()'s own default (the original shared
+        # profile), same convention as ChatGPTConversation's profile_dir.
+        self._profile_dir = profile_dir
         self._commands: "queue.Queue[tuple[Callable[[Any], Any], Future[Any]]]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
@@ -173,12 +187,12 @@ class SharedBrowser:
         self._running.set()
 
     def _run(self, ready: Future[None]) -> None:
-        from app.services.deepseek.browser import PROFILE_DIR, browser_context
+        from app.services.deepseek.browser import browser_context
 
         try:
             with browser_context(
                 headless=False,
-                profile_dir=PROFILE_DIR,
+                profile_dir=self._profile_dir,
                 lock_timeout=LAUNCH_LOCK_TIMEOUT_S,
             ) as context:
                 if not ready.done():
@@ -226,4 +240,26 @@ class SharedBrowser:
                 future.set_exception(exc)
 
 
-shared_browser = SharedBrowser()
+_instances: dict[Path, SharedBrowser] = {}
+_instances_lock = threading.Lock()
+
+
+def get_shared_browser(profile_dir: Path) -> SharedBrowser:
+    """The one SharedBrowser for `profile_dir`, creating it on first use.
+
+    Each ChatGPT worker profile (see chatgpt_pool.py) needs its own sign-in
+    window, since two profiles' persistent contexts are two separate
+    Chromium processes that must not be conflated.
+    """
+    with _instances_lock:
+        instance = _instances.get(profile_dir)
+        if instance is None:
+            instance = SharedBrowser(profile_dir)
+            _instances[profile_dir] = instance
+        return instance
+
+
+# The original single instance, keyed the same way get_shared_browser() would
+# key it -- every existing caller's `from shared_browser import
+# shared_browser` keeps meaning exactly what it always meant.
+shared_browser = get_shared_browser(PROFILE_DIR)

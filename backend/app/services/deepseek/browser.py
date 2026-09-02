@@ -44,6 +44,16 @@ LAUNCH_ARGS = [
     "--no-sandbox",
     "--no-first-run",
     "--no-default-browser-check",
+    # Pin every launch to the SAME internal Chrome profile slot, always.
+    # Without this, Chromium decides which of possibly several internal
+    # profiles inside one user_data_dir to open based on its own Local
+    # State "last_used" pointer -- observed directly diverging on the
+    # original worker profile: a sign-in ended up landing in a second
+    # internal profile ("Profile 1", signed into an unrelated Google
+    # account) while every later automated launch opened "Default"
+    # instead, which had no session cookie at all. Explicit and
+    # deterministic beats "whatever Chrome last remembered".
+    "--profile-directory=Default",
 ]
 
 # Chromium refuses to open the same profile twice; serialise all access.

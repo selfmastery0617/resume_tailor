@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Sequence
 
 if TYPE_CHECKING:
     from app.services.chatgpt_conversation import ChatGPTConversation
@@ -672,33 +672,33 @@ async def _generate_bullets(
 
 @asynccontextmanager
 async def _chat_session() -> AsyncIterator["ChatGPTConversation | None"]:
-    """One ChatGPT chat for the whole job (steps 1-7), or None if it can't
+    """One ChatGPT chat for the whole job (steps 1-10), or None if it can't
     be opened.
 
     A missing or expired session must not fail the extraction — every step has a
     deterministic fallback — so a failed sign-in is reported and yields None.
 
-    The prompt lock is the SAME one chatgpt.ask()/ask_chained_turns() use
-    (see _revise_with_chatgpt, steps 8-9) — held for this conversation's
-    whole lifetime, since the browser profile can only be opened once at a
-    time. _revise_with_chatgpt only ever runs after this block has fully
-    exited (see its own docstring), so the two never actually contend for
-    it; sharing the lock just makes that ordering enforced rather than
-    assumed.
+    Borrows one worker from chatgpt_pool (see its module docstring) for the
+    conversation's whole lifetime, rather than the single global prompt lock
+    this used to share with chatgpt.ask()/ask_chained_turns() -- each worker
+    is a separate, independently signed-in browser profile, so two jobs can
+    now run their full pipelines concurrently instead of one queueing behind
+    the other. Blocks here (not a fixed timeout) until a worker is free, same
+    as the old lock did, just no longer capped at exactly one.
     """
-    from app.services import chatgpt
-    from app.services.chatgpt_conversation import ChatGPTConversation
+    from app.services import chatgpt_pool
 
-    lock = chatgpt._get_prompt_lock()
-    async with lock:
-        conversation = ChatGPTConversation()
+    async with chatgpt_pool.borrow_worker() as worker:
+        from app.services.chatgpt_conversation import ChatGPTConversation
+
+        conversation = ChatGPTConversation(profile_dir=worker.profile_dir)
         try:
             await conversation.start()
         except Exception as exc:  # noqa: BLE001 - expired session or no browser
             progress.emit(
                 "session",
-                f"ChatGPT unavailable ({_exc_label(exc)}) — "
-                "composing everything from database.json",
+                f"ChatGPT unavailable on worker {worker.index} "
+                f"({_exc_label(exc)}) — composing everything from database.json",
                 level="warn",
             )
             yield None
@@ -706,9 +706,24 @@ async def _chat_session() -> AsyncIterator["ChatGPTConversation | None"]:
 
         progress.emit(
             "session",
-            "Opened one ChatGPT chat for this job",
+            f"Opened a ChatGPT chat for this job on worker {worker.index}",
             level="step",
         )
+        if conversation.had_stale_history:
+            # Worth a loud line here rather than silence: this is exactly
+            # the condition that once produced a chat starting mid-pipeline
+            # (step 5 as its first message) with no earlier steps in it --
+            # see chatgpt.ensure_new_chat(). If this fires, the corrective
+            # action already ran and this conversation is genuinely blank
+            # now, but flag it so a recurrence is visible here instead of
+            # requiring a manual look at the browser tab.
+            progress.emit(
+                "session",
+                f"Worker {worker.index} landed on an existing ChatGPT "
+                "conversation instead of a new one — cleared it before "
+                "sending step 1",
+                level="warn",
+            )
         try:
             yield conversation
         finally:
@@ -1732,6 +1747,19 @@ def _parse_final_resume_xml(reply: str) -> dict[str, Any] | None:
     }
 
 
+def _has_closing_tag(root_tag: str) -> Callable[[str], bool]:
+    """An is_complete check for read_reply_since(): true once the reply's
+    closing root tag has actually appeared.
+
+    Used for the two large, structured XML replies (step 8's <resume>, step
+    10's <cover_letter>) where a plain "stopped growing for 2s" stability
+    check was observed to accept a reply mid-stream under concurrent worker
+    load -- see read_reply_since()'s docstring in chatgpt.py.
+    """
+    closing = f"</{root_tag}>"
+    return lambda text: closing in text
+
+
 async def _generate_final_resume(
     chat: "ChatGPTConversation | None",
 ) -> dict[str, Any] | None:
@@ -1766,7 +1794,7 @@ async def _generate_final_resume(
     )
 
     try:
-        reply = await chat.ask(template)
+        reply = await chat.ask(template, is_complete=_has_closing_tag("resume"))
     except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
         progress.emit(
             "format",
@@ -1952,7 +1980,7 @@ async def _generate_cover_letter(
     )
 
     try:
-        reply = await chat.ask(template)
+        reply = await chat.ask(template, is_complete=_has_closing_tag("cover_letter"))
     except Exception as exc:  # noqa: BLE001 - reply timed out or the chat died
         progress.emit(
             "coverletter",
