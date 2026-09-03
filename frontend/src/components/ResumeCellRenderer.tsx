@@ -24,7 +24,10 @@ export interface ResumeGridContext {
    *  button rather than let a stray click race the shared DeepSeek/ChatGPT
    *  browser session the bulk run is already using. */
   bulkRunning: boolean;
-  onGenerateResume: (job: Job) => void;
+  /** `force=true` always re-extracts (a fresh ChatGPT session) rather than
+   *  reusing this job's cached experience data -- used by the Regenerate
+   *  button on an already-generated resume. */
+  onGenerateResume: (job: Job, force?: boolean) => void;
   onOpenFolder: (job: Job) => void;
 }
 
@@ -139,10 +142,10 @@ export function ResumeCellRenderer(props: CustomCellRendererProps<Job>) {
           <button
             type="button"
             className="resume-regenerate"
-            onClick={() => context.onGenerateResume(data)}
+            onClick={() => context.onGenerateResume(data, true)}
             disabled={context.bulkRunning}
-            title="Generate again, overwriting the saved file"
-            aria-label="Regenerate resume"
+            title="Start over: re-extract from a fresh ChatGPT session, then regenerate the resume and cover letter"
+            aria-label="Regenerate resume from scratch"
           >
             ↻
           </button>

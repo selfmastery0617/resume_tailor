@@ -581,9 +581,14 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
   // button click (the single-row caller ignores the return value; a `void`
   // callback type accepts a function that happens to return one).
   const handleGenerateResume = useCallback(
-    async (job: Job): Promise<boolean> => {
+    async (job: Job, force = false): Promise<boolean> => {
       setError(null);
-      if (!experienceResults[job.id]) {
+      // force=true (the Regenerate button on an existing resume) always
+      // re-extracts -- a fresh ChatGPT session, not the cached experience
+      // from last time. Without this, "Regenerate" only re-rendered the
+      // same old data into a PDF, since experienceResults[job.id] was
+      // already populated from the first run.
+      if (force || !experienceResults[job.id]) {
         setExperienceExtracting((prev) => new Map(prev).set(job.id, Date.now()));
         try {
           const result = await extractExperience({
@@ -681,7 +686,11 @@ export function JobsPage({ sessionVersion, active = true }: JobsPageProps) {
       const index = nextIndex++;
       if (index >= targets.length) return;
       const job = targets[index];
-      const ok = await handleGenerateResume(job);
+      // force=true: bulk-selecting rows that already have a resume should
+      // regenerate them from scratch too, same as the individual ↻ button --
+      // otherwise an already-generated row silently just re-renders its old
+      // extraction instead of running a fresh ChatGPT session.
+      const ok = await handleGenerateResume(job, true);
       if (!ok) failed.push(job.title || job.company || job.id);
       setBulkProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
       return runOne();

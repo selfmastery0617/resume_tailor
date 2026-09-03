@@ -149,6 +149,29 @@ def record_document(
     return document_id
 
 
+def supersede_documents(job_id: str, kind: str) -> None:
+    """Soft-delete this job's currently-active documents of `kind`.
+
+    The file on disk is never touched -- only the DB record stops counting
+    as the live one (generated_documents is deliberately an immutable
+    history, see record_document's docstring, so this marks a row
+    superseded rather than mutating or hard-deleting it). Call this at the
+    moment a fresh document is actually recorded, not before generation
+    starts -- superseding first and generation failing after would leave
+    the job showing no resume at all instead of its last working one.
+    """
+    with get_db() as conn:
+        conn.execute(
+            generated_documents.update()
+            .where(
+                generated_documents.c.job_id == UUID(str(job_id)),
+                generated_documents.c.kind == kind,
+                generated_documents.c.deleted_at.is_(None),
+            )
+            .values(deleted_at=datetime.now(timezone.utc))
+        )
+
+
 def list_generated(profile_id: str | None = None) -> list[dict[str, Any]]:
     query = select(generated_documents).where(generated_documents.c.deleted_at.is_(None))
     if profile_id:

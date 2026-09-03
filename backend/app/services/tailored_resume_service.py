@@ -341,6 +341,11 @@ async def generate_for_job(
         "byteSize": len(pdf_bytes),
         "generatedAt": _now(),
     }
+    # The PDF is already written to disk at this point -- superseding the old
+    # active record now, right before recording the new one, means a failure
+    # anywhere earlier (extraction, rendering, the file write above) leaves
+    # the previous resume showing rather than nothing at all.
+    resume_service.supersede_documents(job_id, "resume")
     _save_record(record, render_payload)
     # A resume exists, so the row is ready to send. Never walks an applied row
     # backwards -- see mark_ready.
