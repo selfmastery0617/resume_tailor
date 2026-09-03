@@ -3,15 +3,17 @@
 Two shapes, deliberately different:
 
 * Download name:  <profile-name>-<template-id>-resume.pdf   (slug, ASCII-only)
-* Saved on disk:  <output>/<Profile Name>/<mm-dd-yy>_<Company>_<Job Title>/<Profile>_resume.pdf
+* Saved on disk:  <output>/<Profile Name>/<mm-dd-yy-HHMM>_<Company>_<Job Title>/<Profile>_resume.pdf
 
 The on-disk shape is specified by the user and keeps spaces and capitals, so it
 gets its own sanitiser: strict enough to be traversal-proof and legal on
-Windows, loose enough to stay readable in Explorer.
+Windows, loose enough to stay readable in Explorer. The HHMM component (local,
+24-hour) exists so re-extracting the same company/role later the same day
+gets its own folder instead of silently overwriting the earlier one.
 """
 
 import re
-from datetime import date
+from datetime import datetime
 
 MAX_STEM_LENGTH = 100
 FALLBACK = "resume.pdf"
@@ -76,9 +78,17 @@ def sanitize_component(value: str, fallback: str = "Unknown") -> str:
     return text or fallback
 
 
-def build_job_folder_name(company: str, job_title: str, when: date | None = None) -> str:
-    """`[mm-dd-yy]_[Company]_[Job Title]`, one folder per application."""
-    stamp = (when or date.today()).strftime("%m-%d-%y")
+def build_job_folder_name(company: str, job_title: str, when: datetime | None = None) -> str:
+    """`[mm-dd-yy-HHMM]_[Company]_[Job Title]`, one folder per generation run.
+
+    `when` should be the extraction's own completion time (local), not
+    "now" at whatever moment a PDF happens to render -- see
+    tailored_resume_service._extraction_folder_timestamp(). That keeps the
+    resume and cover letter from the same extraction in the same folder
+    even if they're rendered a few seconds apart, while a genuinely new
+    extraction still gets its own new folder.
+    """
+    stamp = (when or datetime.now()).strftime("%m-%d-%y-%H%M")
     return (
         f"{stamp}_{sanitize_component(company, 'Company')}"
         f"_{sanitize_component(job_title, 'Role')}"

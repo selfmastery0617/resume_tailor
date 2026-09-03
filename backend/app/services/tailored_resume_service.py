@@ -3,7 +3,7 @@
 Turns a stored experience extraction into a resume PDF and writes it to the
 output folder configured in Settings:
 
-    <outputFolder>/<Profile Name>/<mm-dd-yy>_<Company>_<Job Title>/<Profile Name>_resume.pdf
+    <outputFolder>/<Profile Name>/<mm-dd-yy-HHMM>_<Company>_<Job Title>/<Profile Name>_resume.pdf
 
 The extraction's two roles *replace* the profile's experience section — that is
 the point of the feature, and the counts (6 and 8 bullets, two projects) are
@@ -32,6 +32,25 @@ from app.services.progress import progress
 
 class TailoredResumeError(RuntimeError):
     """Anything the user can fix from the UI: no folder, no profile, no data."""
+
+
+def _extraction_folder_timestamp(experience: dict[str, Any]) -> datetime:
+    """When this experience was extracted, converted to local time -- the
+    folder-naming timestamp (see build_job_folder_name). Deriving it from
+    the extraction's own completion time, not "now" at whatever moment a
+    PDF happens to render, is what keeps a resume and its cover letter in
+    the same folder even though they're built by two separate calls a few
+    seconds apart, while a genuinely new extraction still lands in its own
+    new folder. Falls back to now() if extractedAt is somehow missing --
+    every real extraction run sets it, so this should not normally happen.
+    """
+    extracted_at = experience.get("extractedAt")
+    if extracted_at:
+        try:
+            return datetime.fromisoformat(extracted_at).astimezone()
+        except ValueError:
+            pass
+    return datetime.now()
 
 
 def _now() -> str:
@@ -277,7 +296,9 @@ async def generate_for_job(
     root = _output_root()
     profile = resolve_profile(profile_id)
 
-    folder = root / build_profile_folder_name(profile.name) / build_job_folder_name(company, job_title)
+    folder = root / build_profile_folder_name(profile.name) / build_job_folder_name(
+        company, job_title, when=_extraction_folder_timestamp(experience)
+    )
     file_name = build_tailored_pdf_filename(profile.name)
     destination = folder / file_name
 

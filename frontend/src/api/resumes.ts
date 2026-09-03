@@ -7,7 +7,7 @@ export interface TailoredResume {
   profileId: string | null;
   profileName: string;
   templateId: string;
-  /** Absolute path of the `[Profile Name]/[mm-dd-yy]_[Company]_[Job Title]` folder. */
+  /** Absolute path of the `[Profile Name]/[mm-dd-yy-HHMM]_[Company]_[Job Title]` folder. */
   folder: string;
   fileName: string;
   filePath: string;

@@ -4,7 +4,7 @@ Turns step 10's parsed <cover_letter> XML (stored on the extraction run --
 see experience_service.py's _store_run/_load_run) into a cover letter PDF and
 writes it to the *same* per-job folder the resume uses:
 
-    <outputFolder>/<Profile Name>/<mm-dd-yy>_<Company>_<Job Title>/<Profile Name>_cover_letter.pdf
+    <outputFolder>/<Profile Name>/<mm-dd-yy-HHMM>_<Company>_<Job Title>/<Profile Name>_cover_letter.pdf
 
 Mirrors tailored_resume_service.py's generate_for_job() closely, reusing its
 resolve_profile()/_output_root() rather than duplicating them.
@@ -27,6 +27,7 @@ from app.services.pdf.filename import (
 from app.services.progress import progress
 from app.services.tailored_resume_service import (
     TailoredResumeError,
+    _extraction_folder_timestamp,
     _output_root,
     _page_count_of,
     resolve_profile,
@@ -81,7 +82,9 @@ async def generate_for_job(
     root = _output_root()
     profile = resolve_profile(profile_id)
 
-    folder = root / build_profile_folder_name(profile.name) / build_job_folder_name(company, job_title)
+    folder = root / build_profile_folder_name(profile.name) / build_job_folder_name(
+        company, job_title, when=_extraction_folder_timestamp(experience)
+    )
     file_name = build_tailored_cover_letter_filename(profile.name)
     destination = folder / file_name
 
