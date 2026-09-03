@@ -114,8 +114,14 @@ async def generate_for_job(
             f"Could not write {destination}: {exc.strerror or exc}"
         ) from exc
 
-    from app.services.resume_service import record_document
+    from app.services.resume_service import record_document, supersede_documents
 
+    # The PDF is already written to disk at this point -- superseding the old
+    # active record now, right before recording the new one, means a failure
+    # anywhere earlier leaves the previous cover letter showing rather than
+    # nothing at all. See tailored_resume_service.generate_for_job()'s
+    # matching call for the resume side of this.
+    supersede_documents(job_id, "cover_letter")
     record_document(
         profile_id=profile.id,
         job_id=job_id,
