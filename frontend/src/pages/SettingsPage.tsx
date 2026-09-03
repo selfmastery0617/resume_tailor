@@ -215,8 +215,10 @@ export function SettingsPage({ onProviderSignedOut }: SettingsPageProps) {
         <h2>Output folder</h2>
         <p className="notice">
           Generated resumes are saved here, in a
-          <code> [Profile Name]/[mm-dd-yy]_[Company]_[Job Title]</code> folder
-          per job — one top-level folder per profile.
+          <code> [Profile Name]/[mm-dd-yy-HHMM]_[Company]_[Job Title]</code> folder
+          per job — one top-level folder per profile. Re-extracting the same
+          job later the same day gets its own new folder instead of
+          overwriting the earlier one.
         </p>
         <div className="folder-row">
           <input
