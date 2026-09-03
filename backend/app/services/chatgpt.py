@@ -113,16 +113,16 @@ MIN_STABLE_REPLY_CHARS = 40
 # independent of anything about waiting for a reply. This governs
 # send_message()'s click()/fill() specifically, not reply waiting.
 #
-# 90s was observed insufficient in practice, repeatedly: fill()'s own
-# actionability check ("visible, enabled and editable" -- stricter than
-# click()'s, which had just succeeded moments earlier on the same element)
-# kept timing out specifically right after a very large prior reply
-# finished rendering (step 5/6's prompts and JSON replies routinely run
-# into the tens of thousands of characters) -- consistent with the
-# composer staying non-editable for a while after ChatGPT's own client
-# finishes settling a big response, longer than 90s allowed for. Same
-# story as REPLY_START_TIMEOUT_S's own bump from 60s to 180s.
-SEND_ACTION_TIMEOUT_MS = 180_000
+# 90s, then 180s, both observed insufficient in practice, repeatedly:
+# fill()'s own actionability check ("visible, enabled and editable" --
+# stricter than click()'s, which had just succeeded moments earlier on the
+# same element) kept timing out specifically right after a very large
+# prior reply finished rendering (step 5/6's prompts and JSON replies
+# routinely run into the tens of thousands of characters) -- consistent
+# with the composer staying non-editable for a while after ChatGPT's own
+# client finishes settling a big response. Same story as
+# REPLY_START_TIMEOUT_S's own bump from 60s to 180s.
+SEND_ACTION_TIMEOUT_MS = 300_000
 # Real keystroke simulation (send_message()'s last-resort fallback) is far
 # slower than fill() for a large message -- each character is a genuine
 # keydown/input/keyup round trip, not a single DOM write. Generous budget
